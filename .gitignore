@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# Notebooks and editor noise
+.ipynb_checkpoints/
+.DS_Store
+.vscode/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Logs and runtime outputs
+*.log
+artifacts/
+
+# Data and model artifacts
+data/
+*.pt
+*.pth
+*.bin
+*.npy
+*.npz
+*.pkl
+*.joblib
+*.csv
+
+# Misc experiment outputs
+checkpoints/
+outputs/
+reports/
