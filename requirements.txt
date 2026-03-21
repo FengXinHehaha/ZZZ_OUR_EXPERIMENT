@@ -1,0 +1,11 @@
+# Base environment for the rebuilt experiment repository.
+# Install incrementally as the new pipeline is implemented.
+
+numpy
+pandas
+scikit-learn
+tqdm
+psycopg2-binary
+jupyter
+matplotlib
+pyyaml
