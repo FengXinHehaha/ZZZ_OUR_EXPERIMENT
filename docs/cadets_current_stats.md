@@ -16,6 +16,27 @@ Numeric feature dimensions below are the current cleaned dimensions that are rea
 | `network_view__process_node` | 14 | `bind_count` |
 | `network_view__network_node` | 13 | `ip_protocol`, `bind_count` |
 
+## Model-Ready Feature Dimensions
+
+After low-cardinality categorical encoding, the effective GNN input dimensions are:
+
+| Feature Group | Cleaned Numeric Dim | Encoded Categorical Dim | Final Model Dim |
+| --- | ---: | ---: | ---: |
+| `process_view__process_node` | 21 | 0 | 21 |
+| `process_view__file_node` | 15 | 3 | 18 |
+| `process_view__network_node` | 13 | 10 | 23 |
+| `file_view__process_node` | 18 | 0 | 18 |
+| `file_view__file_node` | 16 | 3 | 19 |
+| `network_view__process_node` | 14 | 0 | 14 |
+| `network_view__network_node` | 13 | 10 | 23 |
+
+Categorical encoding currently includes:
+
+- `file_type` for file-node feature groups
+- `local_port_bucket`, `remote_port_bucket`, and `external_remote_ip_flag` for network-node feature groups
+
+These model-ready outputs live under `artifacts/features_model_ready`.
+
 ## Current Window-Level Graph Scale
 
 The counts below use:

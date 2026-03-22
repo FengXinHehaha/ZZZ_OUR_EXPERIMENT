@@ -7,6 +7,7 @@ Implemented notes:
 - `cadets_event_ingest.md` documents the first-stage CADETS event ingest workflow
 - `cadets_feature_extraction.md` documents the first split-aware feature extraction stage
 - `cadets_feature_cleaning.md` defines retained-node feature cleaning and train-based standardization
+- `cadets_feature_encoding.md` defines how cleaned categorical/text columns are converted into graph-ready numeric features
 - `cadets_current_stats.md` records the current retained-node, cleaned-feature, and filtered-edge scale
 - `cadets_file_node_retention.md` defines the first executable file-node filtering policy before graph construction
 - `cadets_node_retention.md` defines the conservative full node-retention policy for process/file/network
