@@ -12,6 +12,7 @@ The immediate goal of this stage is:
 - preserve all process and network nodes
 - aggressively compress low-value file leaf nodes
 - guarantee that active GT file nodes are not dropped by the retention rule
+- make GT loss auditable at every filtering step
 
 This spec applies after feature extraction and before graph construction.
 
@@ -83,16 +84,24 @@ This means:
 
 ## Retention Logic
 
-The rule is deterministic and ordered.
+The rule is deterministic, ordered, and file-type aware.
+
+Every filtering step must also compute:
+
+- how many candidate nodes are removed at this step
+- how many removed nodes are GT nodes
+- the exact GT UUID list removed at this step
+
+This is a hard requirement for this project, not an optional report.
 
 ### Step 1: Hard Keep
 
 A file node is retained immediately if **any** of the following is true:
 
 1. `node_uuid` is a GT file UUID
-2. `execute_count > 0`
+2. `file_type = FILE_OBJECT_FILE` and `execute_count > 0`
 3. `write_count > 0`
-4. `create_object_count > 0`
+4. `file_type = FILE_OBJECT_FILE` and `create_object_count > 0`
 5. `unlink_count > 0`
 6. `rename_count > 0`
 7. `modify_file_attr_count > 0`
@@ -107,15 +116,19 @@ The hard-keep stage exists to preserve:
 
 If a file node was not hard-kept, retain it if **any** of the following is true:
 
-1. `total_accesses >= 3`
-2. `unique_process_count >= 2`
-3. `network_active_process_count >= 1`
+1. `file_type = FILE_OBJECT_FILE` and `total_accesses >= 3`
+2. `file_type = FILE_OBJECT_FILE` and `unique_process_count >= 2`
+3. `file_type = FILE_OBJECT_FILE` and `network_active_process_count >= 1`
+4. `file_type = FILE_OBJECT_DIR` and `total_accesses >= 3`
+5. `file_type = FILE_OBJECT_DIR` and `unique_process_count >= 2`
+6. `file_type = FILE_OBJECT_UNIX_SOCKET` and `total_accesses >= 5`
 
 The soft-keep stage preserves:
 
 - shared files
 - files that are not one-off leaves
 - files touched by processes that also show network activity
+- a small subset of high-traffic UNIX sockets without letting `create_object` keep all of them
 
 ### Step 3: Drop
 
@@ -137,6 +150,7 @@ For each window, the retention stage should write:
 - `artifacts/retention/<window>/file_keep_decisions.tsv`
 - `artifacts/retention/<window>/file_keep_list.tsv`
 - `artifacts/retention/<window>/file_drop_list.tsv`
+- `artifacts/retention/<window>/dropped_gt_file_list.tsv`
 - `artifacts/retention/<window>/summary.json`
 
 And one root-level manifest:
@@ -150,6 +164,7 @@ Each row corresponds to one candidate file node in the current window.
 Required columns:
 
 - `node_uuid`
+- `file_type`
 - `is_gt_file`
 - `hard_keep`
 - `soft_keep`
@@ -167,6 +182,7 @@ Required columns:
 - `modify_file_attr_count`
 - `network_active_process_count`
 - `network_active_process_ratio`
+- `dropped_at_step`
 
 `decision_reason` must be one of:
 
@@ -177,10 +193,46 @@ Required columns:
 - `unlink`
 - `rename`
 - `modify_file_attr`
-- `total_accesses_ge_3`
-- `shared_by_multiple_processes`
-- `network_active_process`
+- `total_accesses_ge_3_file`
+- `shared_by_multiple_processes_file`
+- `network_active_process_file`
+- `total_accesses_ge_3_dir`
+- `shared_by_multiple_processes_dir`
+- `total_accesses_ge_5_unix_socket`
 - `drop_low_value_leaf`
+
+`dropped_at_step` must be one of:
+
+- `not_dropped`
+- `hard_keep_stage`
+- `soft_keep_stage`
+- `drop_stage`
+
+For the current rule, most dropped rows will be marked as `drop_stage`, but the field is required so later multi-stage filters remain auditable under the same schema.
+
+## `dropped_gt_file_list.tsv` Schema
+
+This file contains only GT file UUIDs that were removed by the current retention run.
+
+Required columns:
+
+- `node_uuid`
+- `window_name`
+- `file_type`
+- `decision_reason`
+- `dropped_at_step`
+- `total_accesses`
+- `unique_process_count`
+- `read_count`
+- `write_count`
+- `open_count`
+- `execute_count`
+- `create_object_count`
+- `unlink_count`
+- `rename_count`
+- `modify_file_attr_count`
+- `network_active_process_count`
+- `network_active_process_ratio`
 
 ## Graph Construction Contract
 
@@ -206,8 +258,14 @@ For each window, the retention stage must report:
 - file retention ratio
 - GT file count in the candidate universe
 - GT file retained count
+- GT file dropped count
 - GT file retention ratio
+- GT file drop ratio
 - retained file count by reason
+- dropped file count by reason
+- GT drops by reason
+- GT drops by step
+- dropped GT UUID list path
 
 The first baseline must satisfy:
 
@@ -215,9 +273,31 @@ The first baseline must satisfy:
 2. retained file node count is strictly less than original file node count
 3. retained file node count is materially reduced, with a target reduction of at least `30%`
 
+## GT Audit Rule For Future Filters
+
+This GT-audit requirement is not limited to file-node filtering.
+
+For every later node-filtering stage in this project, including:
+
+- file-node tightening
+- graph-level node pruning
+- node-type-specific filtering
+- edge-induced node removal
+
+the implementation must report:
+
+- filtered node count
+- filtered GT node count
+- filtered GT node ratio
+- filtered GT UUID list
+- filtering rule name
+
+No node-filtering experiment should be accepted without this GT-loss report.
+
 ## Notes
 
 - This spec filters only file nodes because file nodes are the main driver of graph blow-up.
+- `FILE_OBJECT_UNIX_SOCKET` objects dominate the file-node population in CADETS, so the policy is intentionally stricter for them than for regular files.
 - The `7` unmatched GT UUIDs are not force-mapped here; they remain outside this file-node rule.
 - If this first policy is still too large for full-batch graph training, the next tightening step should modify only the soft-keep rules, not the hard-keep rules.
 - The hard-keep rules are intentionally generous because avoiding GT loss is more important than maximum compression in the first full-batch baseline.
