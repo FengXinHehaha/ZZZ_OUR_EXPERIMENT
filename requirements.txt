@@ -2,6 +2,7 @@
 # Install incrementally as the new pipeline is implemented.
 
 numpy
+torch
 pandas
 scikit-learn
 tqdm
