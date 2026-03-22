@@ -1,0 +1,17 @@
+{
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "user": "postgres",
+    "admin_db": "postgres",
+    "target_db": "zzz_our_experiment_cadets",
+    "password_env": "CADETS_PG_PASSWORD"
+  },
+  "source_glob": "/home/fxh/DeepSeek/cadets_total_datasets/cadets/ta1-cadets-e3-official*.json*",
+  "batch_size": 5000,
+  "page_size": 1000,
+  "commit_every_batches": 20,
+  "progress_every_lines": 200000,
+  "file_limit": null,
+  "line_limit": null
+}
