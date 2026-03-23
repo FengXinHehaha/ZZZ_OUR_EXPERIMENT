@@ -40,7 +40,7 @@ VIEW_INPUT_DIMS = {
     "network_view": 37,
 }
 
-DECODER_TYPES = ("dot", "mlp")
+DECODER_TYPES = ("dot", "mlp", "rel_mlp")
 
 SELECTION_METRICS = {
     "val_edge_loss": ("val", "edge_loss", "min"),
@@ -87,7 +87,13 @@ def parse_args() -> argparse.Namespace:
         "--decoder-hidden-dim",
         type=int,
         default=64,
-        help="Hidden dimension for the MLP decoder. Ignored when --decoder-type=dot.",
+        help="Hidden dimension for the MLP-family decoder. Ignored when --decoder-type=dot.",
+    )
+    parser.add_argument(
+        "--relation-embedding-dim",
+        type=int,
+        default=16,
+        help="Relation embedding dimension for --decoder-type=rel_mlp.",
     )
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout applied after the first graph layer.")
     parser.add_argument("--epochs", type=int, default=60, help="Number of training epochs.")
@@ -162,6 +168,13 @@ def maybe_cap_edge_index(edge_index: torch.Tensor, cap: int) -> torch.Tensor:
     return edge_index[:, perm]
 
 
+def maybe_cap_edges(edge_index: torch.Tensor, edge_type: torch.Tensor, cap: int) -> tuple[torch.Tensor, torch.Tensor]:
+    if cap <= 0 or edge_index.shape[1] <= cap:
+        return edge_index, edge_type
+    perm = torch.randperm(edge_index.shape[1], device=edge_index.device)[:cap]
+    return edge_index[:, perm], edge_type[perm]
+
+
 def sample_negative_edges(num_nodes: int, num_samples: int, device: torch.device) -> torch.Tensor:
     src = torch.randint(0, num_nodes, (num_samples,), device=device)
     dst = torch.randint(0, num_nodes, (num_samples,), device=device)
@@ -172,6 +185,13 @@ def sample_negative_edges(num_nodes: int, num_samples: int, device: torch.device
         same = src == dst
 
     return torch.stack([src, dst], dim=0)
+
+
+def sample_negative_edge_types(positive_edge_type: torch.Tensor) -> torch.Tensor:
+    if positive_edge_type.numel() == 0:
+        return positive_edge_type
+    perm = torch.randperm(positive_edge_type.shape[0], device=positive_edge_type.device)
+    return positive_edge_type[perm]
 
 
 def compute_node_scores(num_nodes: int, edge_index: torch.Tensor, edge_error: torch.Tensor) -> torch.Tensor:
@@ -256,6 +276,8 @@ class MultiViewFullBatchGAE(nn.Module):
         dropout: float,
         decoder_type: str = "dot",
         decoder_hidden_dim: int = 64,
+        num_relations: int = 0,
+        relation_embedding_dim: int = 16,
     ) -> None:
         super().__init__()
         self.process_encoder = ViewEncoder(VIEW_INPUT_DIMS["process_view"], hidden_dim, latent_dim, dropout)
@@ -269,6 +291,15 @@ class MultiViewFullBatchGAE(nn.Module):
         if decoder_type == "mlp":
             self.edge_decoder = nn.Sequential(
                 nn.Linear(latent_dim * 4, decoder_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(decoder_hidden_dim, 1),
+            )
+        elif decoder_type == "rel_mlp":
+            if num_relations <= 0:
+                raise ValueError("num_relations must be positive when decoder_type=rel_mlp")
+            self.relation_embedding = nn.Embedding(num_relations, relation_embedding_dim)
+            self.edge_decoder = nn.Sequential(
+                nn.Linear(latent_dim * 4 + relation_embedding_dim, decoder_hidden_dim),
                 nn.ReLU(),
                 nn.Linear(decoder_hidden_dim, 1),
             )
@@ -304,21 +335,28 @@ class MultiViewFullBatchGAE(nn.Module):
             "z_fused": z_fused,
         }
 
-    def decode_edges(self, z: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    def decode_edges(
+        self,
+        z: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_type: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         src = edge_index[0].long()
         dst = edge_index[1].long()
         if self.decoder_type == "dot":
             return (z[src] * z[dst]).sum(dim=1)
 
-        edge_features = torch.cat(
-            [
-                z[src],
-                z[dst],
-                z[src] * z[dst],
-                torch.abs(z[src] - z[dst]),
-            ],
-            dim=1,
-        )
+        edge_feature_parts = [
+            z[src],
+            z[dst],
+            z[src] * z[dst],
+            torch.abs(z[src] - z[dst]),
+        ]
+        if self.decoder_type == "rel_mlp":
+            if edge_type is None:
+                raise ValueError("edge_type is required when decoder_type=rel_mlp")
+            edge_feature_parts.append(self.relation_embedding(edge_type.long()))
+        edge_features = torch.cat(edge_feature_parts, dim=1)
         return self.edge_decoder(edge_features).squeeze(-1)
 
 
@@ -333,6 +371,7 @@ def prepare_graph_payload(graph_path: Path, device: torch.device, restrict_to_no
     }
 
     edge_index = graph["edge_index"].to(device=device, dtype=torch.long)
+    edge_type = graph["edge_type"].to(device=device, dtype=torch.long)
     edge_weight = torch.log1p(graph["edge_event_count"].to(device=device, dtype=torch.float32))
     y = graph["y"].to(device=device, dtype=torch.float32)
     gt_mask = graph["gt_mask"].to(device=device, dtype=torch.bool)
@@ -341,6 +380,7 @@ def prepare_graph_payload(graph_path: Path, device: torch.device, restrict_to_no
     if restrict_to_normal_edges:
         train_mask = build_train_edge_mask(graph).to(device=device, dtype=torch.bool)
         edge_index = edge_index[:, train_mask]
+        edge_type = edge_type[train_mask]
         edge_weight = edge_weight[train_mask]
 
     adjacency = build_normalized_adjacency(
@@ -357,6 +397,7 @@ def prepare_graph_payload(graph_path: Path, device: torch.device, restrict_to_no
         "summary": summary,
         "num_nodes": int(graph["num_nodes"]),
         "edge_index": edge_index,
+        "edge_type": edge_type,
         "adjacency": adjacency,
         "x_views": x_views,
         "y": y,
@@ -375,18 +416,24 @@ def evaluate_graph(
         encoded = model.encode(graph_payload["x_views"], graph_payload["adjacency"])
         z_fused = encoded["z_fused"]
 
-        positive_edges = graph_payload["edge_index"]
-        positive_edges = maybe_cap_edge_index(positive_edges, edge_cap)
+        positive_edges, positive_edge_type = maybe_cap_edges(
+            graph_payload["edge_index"],
+            graph_payload["edge_type"],
+            edge_cap,
+        )
         negative_edges = sample_negative_edges(graph_payload["num_nodes"], positive_edges.shape[1], z_fused.device)
+        negative_edge_type = sample_negative_edge_types(positive_edge_type)
 
-        pos_logits = model.decode_edges(z_fused, positive_edges)
-        neg_logits = model.decode_edges(z_fused, negative_edges)
+        pos_logits = model.decode_edges(z_fused, positive_edges, positive_edge_type)
+        neg_logits = model.decode_edges(z_fused, negative_edges, negative_edge_type)
 
         pos_loss = F.binary_cross_entropy_with_logits(pos_logits, torch.ones_like(pos_logits))
         neg_loss = F.binary_cross_entropy_with_logits(neg_logits, torch.zeros_like(neg_logits))
         edge_loss = float((pos_loss + neg_loss).item())
 
-        edge_error = 1.0 - torch.sigmoid(model.decode_edges(z_fused, graph_payload["edge_index"]))
+        edge_error = 1.0 - torch.sigmoid(
+            model.decode_edges(z_fused, graph_payload["edge_index"], graph_payload["edge_type"])
+        )
         node_scores = compute_node_scores(graph_payload["num_nodes"], graph_payload["edge_index"], edge_error)
         node_metrics = compute_binary_metrics(graph_payload["y"], node_scores)
 
@@ -422,11 +469,16 @@ def train_epoch(
     encoded = model.encode(train_payload["x_views"], train_payload["adjacency"])
     z_fused = encoded["z_fused"]
 
-    positive_edges = maybe_cap_edge_index(train_payload["edge_index"], train_pos_edge_cap)
+    positive_edges, positive_edge_type = maybe_cap_edges(
+        train_payload["edge_index"],
+        train_payload["edge_type"],
+        train_pos_edge_cap,
+    )
     negative_edges = sample_negative_edges(train_payload["num_nodes"], positive_edges.shape[1], z_fused.device)
+    negative_edge_type = sample_negative_edge_types(positive_edge_type)
 
-    pos_logits = model.decode_edges(z_fused, positive_edges)
-    neg_logits = model.decode_edges(z_fused, negative_edges)
+    pos_logits = model.decode_edges(z_fused, positive_edges, positive_edge_type)
+    neg_logits = model.decode_edges(z_fused, negative_edges, negative_edge_type)
 
     pos_loss = F.binary_cross_entropy_with_logits(pos_logits, torch.ones_like(pos_logits))
     neg_loss = F.binary_cross_entropy_with_logits(neg_logits, torch.zeros_like(neg_logits))
@@ -481,6 +533,8 @@ def main() -> None:
         dropout=args.dropout,
         decoder_type=args.decoder_type,
         decoder_hidden_dim=args.decoder_hidden_dim,
+        num_relations=int(train_payload["summary"]["event_type_count"]),
+        relation_embedding_dim=args.relation_embedding_dim,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -499,6 +553,8 @@ def main() -> None:
         "latent_dim": args.latent_dim,
         "decoder_type": args.decoder_type,
         "decoder_hidden_dim": args.decoder_hidden_dim,
+        "relation_embedding_dim": args.relation_embedding_dim,
+        "num_relations": int(train_payload["summary"]["event_type_count"]),
         "dropout": args.dropout,
         "epochs": args.epochs,
         "lr": args.lr,

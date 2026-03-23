@@ -13,8 +13,9 @@ from train_gnn import (
     DEFAULT_EVAL_GRAPHS,
     MultiViewFullBatchGAE,
     compute_binary_metrics,
-    maybe_cap_edge_index,
+    maybe_cap_edges,
     prepare_graph_payload,
+    sample_negative_edge_types,
 )
 
 
@@ -147,8 +148,13 @@ def evaluate_single_graph(
         encoded = model.encode(payload["x_views"], payload["adjacency"])
         z_fused = encoded["z_fused"]
 
-        positive_edges = maybe_cap_edge_index(payload["edge_index"], edge_cap)
-        negative_edges = maybe_cap_edge_index(payload["edge_index"], edge_cap)
+        positive_edges, positive_edge_type = maybe_cap_edges(
+            payload["edge_index"],
+            payload["edge_type"],
+            edge_cap,
+        )
+        negative_edges = positive_edges
+        negative_edge_type = sample_negative_edge_types(positive_edge_type)
         if negative_edges.shape[1] > 0:
             negative_edges = torch.stack(
                 [
@@ -158,14 +164,16 @@ def evaluate_single_graph(
                 dim=0,
             )
 
-        pos_logits = model.decode_edges(z_fused, positive_edges)
-        neg_logits = model.decode_edges(z_fused, negative_edges)
+        pos_logits = model.decode_edges(z_fused, positive_edges, positive_edge_type)
+        neg_logits = model.decode_edges(z_fused, negative_edges, negative_edge_type)
 
         pos_loss = torch.nn.functional.binary_cross_entropy_with_logits(pos_logits, torch.ones_like(pos_logits))
         neg_loss = torch.nn.functional.binary_cross_entropy_with_logits(neg_logits, torch.zeros_like(neg_logits))
         edge_loss = float((pos_loss + neg_loss).item())
 
-        edge_error = 1.0 - torch.sigmoid(model.decode_edges(z_fused, payload["edge_index"]))
+        edge_error = 1.0 - torch.sigmoid(
+            model.decode_edges(z_fused, payload["edge_index"], payload["edge_type"])
+        )
         base_scores = compute_node_scores_by_method(
             payload["num_nodes"],
             payload["edge_index"].detach().cpu(),
@@ -257,6 +265,8 @@ def main() -> None:
         dropout=float(config["dropout"]),
         decoder_type=str(config.get("decoder_type", "dot")),
         decoder_hidden_dim=int(config.get("decoder_hidden_dim", config["latent_dim"] * 2)),
+        num_relations=int(config.get("num_relations", 0)),
+        relation_embedding_dim=int(config.get("relation_embedding_dim", 16)),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
 

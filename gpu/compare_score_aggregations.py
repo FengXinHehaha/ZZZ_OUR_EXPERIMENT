@@ -237,7 +237,9 @@ def evaluate_single_graph(
     with torch.no_grad():
         encoded = model.encode(payload["x_views"], payload["adjacency"])
         z_fused = encoded["z_fused"]
-        edge_error = 1.0 - torch.sigmoid(model.decode_edges(z_fused, payload["edge_index"]))
+        edge_error = 1.0 - torch.sigmoid(
+            model.decode_edges(z_fused, payload["edge_index"], payload["edge_type"])
+        )
 
     edge_index_cpu = payload["edge_index"].detach().cpu()
     edge_error_cpu = edge_error.detach().cpu().to(dtype=torch.float32)
@@ -308,6 +310,8 @@ def main() -> None:
         dropout=float(config["dropout"]),
         decoder_type=str(config.get("decoder_type", "dot")),
         decoder_hidden_dim=int(config.get("decoder_hidden_dim", config["latent_dim"] * 2)),
+        num_relations=int(config.get("num_relations", 0)),
+        relation_embedding_dim=int(config.get("relation_embedding_dim", 16)),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
 
