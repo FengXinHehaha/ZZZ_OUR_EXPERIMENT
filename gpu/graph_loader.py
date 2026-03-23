@@ -20,7 +20,7 @@ VIEW_GROUP_ORDER = {
     ],
 }
 
-RELATION_GROUP_SCHEMES = ("coarse_v1",)
+RELATION_GROUP_SCHEMES = ("coarse_v1", "coarse_v2")
 
 RELATION_GROUPS_COARSE_V1 = (
     "file_read",
@@ -31,41 +31,64 @@ RELATION_GROUPS_COARSE_V1 = (
     "flow_other",
 )
 
+RELATION_GROUPS_COARSE_V2 = (
+    "file_read",
+    "file_write",
+    "file_meta",
+    "process_lifecycle",
+    "process_control",
+    "network_connect",
+    "network_io",
+    "flow_other",
+)
+
 
 def load_graph(graph_path: str | Path) -> Dict[str, object]:
     return torch.load(Path(graph_path), map_location="cpu")
 
 
 def event_name_to_relation_group(event_name: str, scheme: str = "coarse_v1") -> str:
-    if scheme != "coarse_v1":
-        raise ValueError(f"Unsupported relation group scheme: {scheme}")
-
     if event_name in {"EVENT_OPEN", "EVENT_READ", "EVENT_LSEEK", "EVENT_MMAP", "EVENT_CLOSE", "EVENT_FCNTL"}:
         return "file_read"
     if event_name in {"EVENT_WRITE", "EVENT_TRUNCATE"}:
         return "file_write"
     if event_name in {"EVENT_CREATE_OBJECT", "EVENT_LINK", "EVENT_MODIFY_FILE_ATTRIBUTES", "EVENT_RENAME", "EVENT_UNLINK"}:
         return "file_meta"
-    if event_name in {
-        "EVENT_CHANGE_PRINCIPAL",
-        "EVENT_EXECUTE",
-        "EVENT_EXIT",
-        "EVENT_FORK",
-        "EVENT_MODIFY_PROCESS",
-        "EVENT_SIGNAL",
-    }:
-        return "process"
-    if event_name in {
-        "EVENT_ACCEPT",
-        "EVENT_BIND",
-        "EVENT_CONNECT",
-        "EVENT_RECVFROM",
-        "EVENT_RECVMSG",
-        "EVENT_SENDMSG",
-        "EVENT_SENDTO",
-    }:
-        return "network"
-    return "flow_other"
+
+    if scheme == "coarse_v1":
+        if event_name in {
+            "EVENT_CHANGE_PRINCIPAL",
+            "EVENT_EXECUTE",
+            "EVENT_EXIT",
+            "EVENT_FORK",
+            "EVENT_MODIFY_PROCESS",
+            "EVENT_SIGNAL",
+        }:
+            return "process"
+        if event_name in {
+            "EVENT_ACCEPT",
+            "EVENT_BIND",
+            "EVENT_CONNECT",
+            "EVENT_RECVFROM",
+            "EVENT_RECVMSG",
+            "EVENT_SENDMSG",
+            "EVENT_SENDTO",
+        }:
+            return "network"
+        return "flow_other"
+
+    if scheme == "coarse_v2":
+        if event_name in {"EVENT_EXECUTE", "EVENT_EXIT", "EVENT_FORK"}:
+            return "process_lifecycle"
+        if event_name in {"EVENT_CHANGE_PRINCIPAL", "EVENT_MODIFY_PROCESS", "EVENT_SIGNAL"}:
+            return "process_control"
+        if event_name in {"EVENT_ACCEPT", "EVENT_BIND", "EVENT_CONNECT"}:
+            return "network_connect"
+        if event_name in {"EVENT_RECVFROM", "EVENT_RECVMSG", "EVENT_SENDMSG", "EVENT_SENDTO"}:
+            return "network_io"
+        return "flow_other"
+
+    raise ValueError(f"Unsupported relation group scheme: {scheme}")
 
 
 def build_relation_group_mapping(
@@ -74,6 +97,8 @@ def build_relation_group_mapping(
 ) -> tuple[torch.Tensor, List[str]]:
     if scheme == "coarse_v1":
         group_names = list(RELATION_GROUPS_COARSE_V1)
+    elif scheme == "coarse_v2":
+        group_names = list(RELATION_GROUPS_COARSE_V2)
     else:
         raise ValueError(f"Unsupported relation group scheme: {scheme}")
 

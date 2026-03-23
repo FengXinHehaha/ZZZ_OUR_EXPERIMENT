@@ -29,7 +29,7 @@ Recommended workflow on the GPU server:
 
 Current strongest baseline:
 
-- training: `train_gnn.py --decoder-type dot --message-passing-type vanilla`
+- training: `train_gnn.py --decoder-type dot --message-passing-type rel_grouped --relation-group-scheme coarse_v1`
 - evaluation: `evaluate_checkpoint.py --score-method top5_mean --score-calibration robust_zscore_by_type`
 
 Lightweight relation-aware message passing:
@@ -37,3 +37,5 @@ Lightweight relation-aware message passing:
 - `train_gnn.py --message-passing-type rel_grouped --relation-group-scheme coarse_v1`
 - `coarse_v1` splits event types into grouped adjacencies:
   `file_read / file_write / file_meta / process / network / flow_other`
+- `coarse_v2` is a finer grouped variant:
+  `file_read / file_write / file_meta / process_lifecycle / process_control / network_connect / network_io / flow_other`
