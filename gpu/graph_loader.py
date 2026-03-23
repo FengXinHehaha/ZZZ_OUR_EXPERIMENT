@@ -79,3 +79,62 @@ def summarize_graph(graph: Dict[str, object]) -> Dict[str, object]:
             for group_name, payload in sorted(graph["feature_groups"].items())
         },
     }
+
+
+def build_normalized_adjacency(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weight: torch.Tensor | None = None,
+    add_self_loops: bool = True,
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
+    if device is None:
+        device = edge_index.device
+    device = torch.device(device)
+
+    src = edge_index[0].to(device=device, dtype=torch.long)
+    dst = edge_index[1].to(device=device, dtype=torch.long)
+
+    if edge_weight is None:
+        weight = torch.ones(src.shape[0], device=device, dtype=torch.float32)
+    else:
+        weight = edge_weight.to(device=device, dtype=torch.float32)
+
+    indices = torch.cat(
+        [
+            torch.stack([src, dst], dim=0),
+            torch.stack([dst, src], dim=0),
+        ],
+        dim=1,
+    )
+    values = torch.cat([weight, weight], dim=0)
+
+    if add_self_loops:
+        loop_nodes = torch.arange(num_nodes, device=device, dtype=torch.long)
+        loop_index = torch.stack([loop_nodes, loop_nodes], dim=0)
+        indices = torch.cat([indices, loop_index], dim=1)
+        values = torch.cat([values, torch.ones(num_nodes, device=device, dtype=torch.float32)], dim=0)
+
+    adjacency = torch.sparse_coo_tensor(
+        indices,
+        values,
+        (num_nodes, num_nodes),
+        device=device,
+        dtype=torch.float32,
+    ).coalesce()
+
+    row, col = adjacency.indices()
+    val = adjacency.values()
+
+    degree = torch.zeros(num_nodes, device=device, dtype=torch.float32)
+    degree.index_add_(0, row, val)
+    degree_inv_sqrt = degree.clamp_min(1e-12).pow(-0.5)
+    norm_values = degree_inv_sqrt[row] * val * degree_inv_sqrt[col]
+
+    return torch.sparse_coo_tensor(
+        adjacency.indices(),
+        norm_values,
+        adjacency.shape,
+        device=device,
+        dtype=torch.float32,
+    ).coalesce()
