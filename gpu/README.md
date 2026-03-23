@@ -8,6 +8,7 @@ Current entrypoints:
 - `train_smoke.py` performs a lightweight device smoke test on a built graph artifact
 - `train_gnn.py` trains a first full-batch multi-view GNN baseline on the built graph artifacts
   and saves the best checkpoint by a selectable metric (default: `val_edge_loss`)
+- `evaluate_checkpoint.py` exports node-level anomaly scores and top-k summaries from a saved checkpoint
 
 Recommended workflow on the GPU server:
 
