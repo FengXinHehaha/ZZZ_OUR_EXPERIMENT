@@ -73,6 +73,8 @@ def main() -> None:
     print(f"[evaluation-summary] eval_dir={eval_dir}")
     print(f"[evaluation-summary] checkpoint={summary['checkpoint']}")
     print(f"[evaluation-summary] checkpoint_epoch={summary['checkpoint_epoch']}")
+    if summary.get("score_method") is not None:
+        print(f"[evaluation-summary] score_method={summary['score_method']}")
     if summary.get("best_record") is not None:
         best_record = summary["best_record"]
         print(
@@ -87,6 +89,7 @@ def main() -> None:
             f"[window] {graph['name']} "
             f"roc_auc={graph['roc_auc']} "
             f"ap={graph['average_precision']} "
+            f"score_method={graph.get('score_method')} "
             f"edge_loss={graph['edge_loss']:.6f} "
             f"gt_nodes={graph['gt_nodes']}"
         )

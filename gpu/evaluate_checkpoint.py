@@ -7,11 +7,11 @@ from typing import Dict, List
 
 import torch
 
+from score_aggregation import SCORE_METHODS, compute_node_scores_by_method
 from train_gnn import (
     DEFAULT_EVAL_GRAPHS,
     MultiViewFullBatchGAE,
     compute_binary_metrics,
-    compute_node_scores,
     maybe_cap_edge_index,
     prepare_graph_payload,
 )
@@ -49,6 +49,13 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Optional cap on positive edges for edge-loss reporting. 0 means use all.",
+    )
+    parser.add_argument(
+        "--score-method",
+        type=str,
+        default="top5_mean",
+        choices=sorted(SCORE_METHODS),
+        help="Node anomaly score aggregation. Default: top5_mean.",
     )
     parser.add_argument(
         "--topk",
@@ -120,6 +127,7 @@ def evaluate_single_graph(
     graph_path: Path,
     device: torch.device,
     edge_cap: int,
+    score_method: str,
     topk: List[int],
     window_output_dir: Path,
 ) -> Dict[str, object]:
@@ -149,8 +157,13 @@ def evaluate_single_graph(
         edge_loss = float((pos_loss + neg_loss).item())
 
         edge_error = 1.0 - torch.sigmoid(model.decode_edges(z_fused, payload["edge_index"]))
-        node_scores = compute_node_scores(payload["num_nodes"], payload["edge_index"], edge_error)
-        node_metrics = compute_binary_metrics(payload["y"], node_scores)
+        node_scores = compute_node_scores_by_method(
+            payload["num_nodes"],
+            payload["edge_index"].detach().cpu(),
+            edge_error.detach().cpu().to(dtype=torch.float32),
+            score_method,
+        )
+        node_metrics = compute_binary_metrics(payload["y"].detach().cpu().to(dtype=torch.float32), node_scores)
 
         gate_means = encoded["gate_alpha"].mean(dim=0).detach().cpu().tolist()
 
@@ -200,6 +213,7 @@ def evaluate_single_graph(
             "file_view": float(gate_means[1]),
             "network_view": float(gate_means[2]),
         },
+        "score_method": score_method,
         "topk": topk_summary,
         "node_scores_file": str(node_scores_path),
     }
@@ -243,6 +257,7 @@ def main() -> None:
         "checkpoint_epoch": int(checkpoint.get("epoch", -1)),
         "best_record": checkpoint.get("best_record"),
         "selection_metric": config.get("selection_metric"),
+        "score_method": args.score_method,
         "graphs": [],
     }
 
@@ -255,6 +270,7 @@ def main() -> None:
             graph_path=graph_path,
             device=device,
             edge_cap=args.edge_cap,
+            score_method=args.score_method,
             topk=topk,
             window_output_dir=run_dir / window_name,
         )
@@ -262,6 +278,7 @@ def main() -> None:
         print(
             f"[eval-checkpoint] {window_name}: "
             f"roc_auc={summary['roc_auc']} ap={summary['average_precision']} "
+            f"score_method={summary['score_method']} "
             f"edge_loss={summary['edge_loss']:.6f}",
             flush=True,
         )
