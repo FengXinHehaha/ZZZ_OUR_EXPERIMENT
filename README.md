@@ -18,6 +18,7 @@ This repository is the clean starting point for our rebuilt APT experiment pipel
 
 - `docs/` experiment notes, design decisions, and evaluation plans
 - `src/` source code for the new pipeline
+- `gpu/` GPU-server-side training and smoke-test entrypoints
 - `configs/` configuration files and environment settings
 - `artifacts/` runtime outputs, logs, checkpoints, and generated data
 
