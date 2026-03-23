@@ -294,6 +294,8 @@ def main() -> None:
         hidden_dim=int(config["hidden_dim"]),
         latent_dim=int(config["latent_dim"]),
         dropout=float(config["dropout"]),
+        decoder_type=str(config.get("decoder_type", "dot")),
+        decoder_hidden_dim=int(config.get("decoder_hidden_dim", config["latent_dim"] * 2)),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
 

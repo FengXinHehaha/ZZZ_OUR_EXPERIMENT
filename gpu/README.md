@@ -7,7 +7,8 @@ Current entrypoints:
 - `graph_loader.py` loads `graph.pt` and assembles block-concatenated per-view feature matrices
 - `train_smoke.py` performs a lightweight device smoke test on a built graph artifact
 - `train_gnn.py` trains a first full-batch multi-view GNN baseline on the built graph artifacts
-  and saves the best checkpoint by a selectable metric (default: `val_edge_loss`)
+  and saves the best checkpoint by a selectable metric (default: `val_edge_loss`); decoder options
+  now include `dot` and `mlp`
 - `evaluate_checkpoint.py` exports node-level anomaly scores and top-k summaries from a saved checkpoint
   and now defaults to `top5_mean + robust_zscore_by_type`
 - `summarize_evaluation.py` prints a compact top-k hit summary from an evaluation output directory

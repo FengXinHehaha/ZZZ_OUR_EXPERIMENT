@@ -40,6 +40,8 @@ VIEW_INPUT_DIMS = {
     "network_view": 37,
 }
 
+DECODER_TYPES = ("dot", "mlp")
+
 SELECTION_METRICS = {
     "val_edge_loss": ("val", "edge_loss", "min"),
     "val_roc_auc": ("val", "roc_auc", "max"),
@@ -74,6 +76,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--hidden-dim", type=int, default=64, help="Hidden dimension for each view encoder.")
     parser.add_argument("--latent-dim", type=int, default=32, help="Latent dimension for each view encoder.")
+    parser.add_argument(
+        "--decoder-type",
+        type=str,
+        default="dot",
+        choices=sorted(DECODER_TYPES),
+        help="Edge decoder type. Default: dot.",
+    )
+    parser.add_argument(
+        "--decoder-hidden-dim",
+        type=int,
+        default=64,
+        help="Hidden dimension for the MLP decoder. Ignored when --decoder-type=dot.",
+    )
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout applied after the first graph layer.")
     parser.add_argument("--epochs", type=int, default=60, help="Number of training epochs.")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
@@ -234,15 +249,31 @@ class ViewEncoder(nn.Module):
 
 
 class MultiViewFullBatchGAE(nn.Module):
-    def __init__(self, hidden_dim: int, latent_dim: int, dropout: float) -> None:
+    def __init__(
+        self,
+        hidden_dim: int,
+        latent_dim: int,
+        dropout: float,
+        decoder_type: str = "dot",
+        decoder_hidden_dim: int = 64,
+    ) -> None:
         super().__init__()
         self.process_encoder = ViewEncoder(VIEW_INPUT_DIMS["process_view"], hidden_dim, latent_dim, dropout)
         self.file_encoder = ViewEncoder(VIEW_INPUT_DIMS["file_view"], hidden_dim, latent_dim, dropout)
         self.network_encoder = ViewEncoder(VIEW_INPUT_DIMS["network_view"], hidden_dim, latent_dim, dropout)
+        self.decoder_type = decoder_type
 
         self.process_gate = nn.Linear(latent_dim, 1)
         self.file_gate = nn.Linear(latent_dim, 1)
         self.network_gate = nn.Linear(latent_dim, 1)
+        if decoder_type == "mlp":
+            self.edge_decoder = nn.Sequential(
+                nn.Linear(latent_dim * 4, decoder_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(decoder_hidden_dim, 1),
+            )
+        elif decoder_type != "dot":
+            raise ValueError(f"Unsupported decoder type: {decoder_type}")
 
     def encode(self, x_views: Dict[str, torch.Tensor], adjacency: torch.Tensor) -> Dict[str, torch.Tensor]:
         z_process = self.process_encoder(x_views["process_view"], adjacency)
@@ -273,11 +304,22 @@ class MultiViewFullBatchGAE(nn.Module):
             "z_fused": z_fused,
         }
 
-    @staticmethod
-    def decode_edges(z: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    def decode_edges(self, z: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         src = edge_index[0].long()
         dst = edge_index[1].long()
-        return (z[src] * z[dst]).sum(dim=1)
+        if self.decoder_type == "dot":
+            return (z[src] * z[dst]).sum(dim=1)
+
+        edge_features = torch.cat(
+            [
+                z[src],
+                z[dst],
+                z[src] * z[dst],
+                torch.abs(z[src] - z[dst]),
+            ],
+            dim=1,
+        )
+        return self.edge_decoder(edge_features).squeeze(-1)
 
 
 def prepare_graph_payload(graph_path: Path, device: torch.device, restrict_to_normal_edges: bool) -> Dict[str, object]:
@@ -437,6 +479,8 @@ def main() -> None:
         hidden_dim=args.hidden_dim,
         latent_dim=args.latent_dim,
         dropout=args.dropout,
+        decoder_type=args.decoder_type,
+        decoder_hidden_dim=args.decoder_hidden_dim,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -453,6 +497,8 @@ def main() -> None:
         "seed": args.seed,
         "hidden_dim": args.hidden_dim,
         "latent_dim": args.latent_dim,
+        "decoder_type": args.decoder_type,
+        "decoder_hidden_dim": args.decoder_hidden_dim,
         "dropout": args.dropout,
         "epochs": args.epochs,
         "lr": args.lr,
