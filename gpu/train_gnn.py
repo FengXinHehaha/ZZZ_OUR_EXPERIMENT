@@ -40,6 +40,14 @@ VIEW_INPUT_DIMS = {
     "network_view": 37,
 }
 
+SELECTION_METRICS = {
+    "val_edge_loss": ("val", "edge_loss", "min"),
+    "val_roc_auc": ("val", "roc_auc", "max"),
+    "val_average_precision": ("val", "average_precision", "max"),
+    "test_2018-04-12_roc_auc": ("test_2018-04-12", "roc_auc", "max"),
+    "test_2018-04-12_average_precision": ("test_2018-04-12", "average_precision", "max"),
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -67,7 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-dim", type=int, default=64, help="Hidden dimension for each view encoder.")
     parser.add_argument("--latent-dim", type=int, default=32, help="Latent dimension for each view encoder.")
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout applied after the first graph layer.")
-    parser.add_argument("--epochs", type=int, default=20, help="Number of training epochs.")
+    parser.add_argument("--epochs", type=int, default=60, help="Number of training epochs.")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
     parser.add_argument("--weight-decay", type=float, default=1e-5, help="AdamW weight decay.")
     parser.add_argument(
@@ -93,6 +101,13 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="",
         help="Optional run name. Defaults to a timestamped name.",
+    )
+    parser.add_argument(
+        "--selection-metric",
+        type=str,
+        default="val_edge_loss",
+        choices=sorted(SELECTION_METRICS.keys()),
+        help="Metric used to save best_model.pt. Default: val_edge_loss",
     )
     return parser.parse_args()
 
@@ -176,6 +191,21 @@ def compute_binary_metrics(y_true: torch.Tensor, scores: torch.Tensor) -> Dict[s
         "roc_auc": float(roc_auc_score(y_np, s_np)),
         "average_precision": float(average_precision_score(y_np, s_np)),
     }
+
+
+def find_eval_metric(eval_metrics: List[Dict[str, object]], name: str) -> Dict[str, object] | None:
+    return next((metric for metric in eval_metrics if metric["name"] == name), None)
+
+
+def selection_score(eval_metrics: List[Dict[str, object]], selection_metric: str) -> tuple[float | None, str]:
+    eval_name, field_name, mode = SELECTION_METRICS[selection_metric]
+    metric = find_eval_metric(eval_metrics, eval_name)
+    if metric is None:
+        return None, mode
+    value = metric.get(field_name)
+    if value is None:
+        return None, mode
+    return float(value), mode
 
 
 class SparseGCNLayer(nn.Module):
@@ -411,7 +441,9 @@ def main() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     history: List[Dict[str, object]] = []
-    best_val_ap = -math.inf
+    _, _, selection_mode = SELECTION_METRICS[args.selection_metric]
+    best_score = math.inf if selection_mode == "min" else -math.inf
+    best_record: Dict[str, object] | None = None
     best_checkpoint = run_dir / "best_model.pt"
 
     config = {
@@ -428,6 +460,7 @@ def main() -> None:
         "train_pos_edge_cap": args.train_pos_edge_cap,
         "eval_pos_edge_cap": args.eval_pos_edge_cap,
         "run_name": run_name,
+        "selection_metric": args.selection_metric,
     }
     with (run_dir / "config.json").open("w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2)
@@ -470,12 +503,19 @@ def main() -> None:
                 flush=True,
             )
 
-        val_metric = next((metric for metric in eval_metrics if metric["name"] == "val"), None)
-        if val_metric is not None:
-            score = val_metric["average_precision"]
-            comparable_score = score if score is not None else -math.inf
-            if comparable_score > best_val_ap:
-                best_val_ap = comparable_score
+        score, mode = selection_score(eval_metrics, args.selection_metric)
+        if score is not None:
+            improved = score < best_score if mode == "min" else score > best_score
+            if improved:
+                best_score = score
+                best_record = {
+                    "epoch": epoch,
+                    "selection_metric": args.selection_metric,
+                    "selection_mode": mode,
+                    "selection_score": score,
+                    "train": train_metrics,
+                    "eval": eval_metrics,
+                }
                 torch.save(
                     {
                         "model_state_dict": model.state_dict(),
@@ -483,8 +523,16 @@ def main() -> None:
                         "config": config,
                         "epoch": epoch,
                         "history": history,
+                        "best_record": best_record,
                     },
                     best_checkpoint,
+                )
+                with (run_dir / "best_summary.json").open("w", encoding="utf-8") as handle:
+                    json.dump(best_record, handle, indent=2)
+                print(
+                    f"[train-gnn] new best checkpoint: epoch={epoch:03d} "
+                    f"{args.selection_metric}={score:.6f}",
+                    flush=True,
                 )
 
         with (run_dir / "metrics.json").open("w", encoding="utf-8") as handle:
@@ -497,10 +545,17 @@ def main() -> None:
             "config": config,
             "epoch": args.epochs,
             "history": history,
+            "best_record": best_record,
         },
         run_dir / "last_model.pt",
     )
 
+    if best_record is not None:
+        print(
+            f"[train-gnn] best epoch={best_record['epoch']:03d} "
+            f"{best_record['selection_metric']}={best_record['selection_score']:.6f}",
+            flush=True,
+        )
     print(f"[train-gnn] finished. outputs -> {run_dir}", flush=True)
 
 

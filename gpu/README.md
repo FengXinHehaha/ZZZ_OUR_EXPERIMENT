@@ -7,6 +7,7 @@ Current entrypoints:
 - `graph_loader.py` loads `graph.pt` and assembles block-concatenated per-view feature matrices
 - `train_smoke.py` performs a lightweight device smoke test on a built graph artifact
 - `train_gnn.py` trains a first full-batch multi-view GNN baseline on the built graph artifacts
+  and saves the best checkpoint by a selectable metric (default: `val_edge_loss`)
 
 Recommended workflow on the GPU server:
 
