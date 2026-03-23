@@ -13,7 +13,8 @@ Current entrypoints:
 - `summarize_evaluation.py` prints a compact top-k hit summary from an evaluation output directory
 - `analyze_gt_ranks.py` measures where GT nodes land in the ranked anomaly list, including top-ratio coverage
 - `compare_score_aggregations.py` compares multiple node-score aggregations (`mean / max / top-k mean / q90`) on the same checkpoint
-- `compare_score_calibrations.py` compares node-type calibration methods on top of a chosen base score (default: `top5_mean`)
+- `compare_score_calibrations.py` compares node-type calibration methods on top of a chosen base score
+  (default: `top5_mean`), including raw+robust hybrid variants
 
 Recommended workflow on the GPU server:
 
