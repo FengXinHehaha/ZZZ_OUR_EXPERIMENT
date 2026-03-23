@@ -13,7 +13,9 @@ import torch.nn.functional as F
 from graph_loader import (
     build_all_view_matrices,
     build_normalized_adjacency,
+    build_relation_group_adjacencies,
     load_graph,
+    RELATION_GROUP_SCHEMES,
     summarize_graph,
 )
 
@@ -41,6 +43,7 @@ VIEW_INPUT_DIMS = {
 }
 
 DECODER_TYPES = ("dot", "mlp", "rel_mlp")
+MESSAGE_PASSING_TYPES = ("vanilla", "rel_grouped")
 
 SELECTION_METRICS = {
     "val_edge_loss": ("val", "edge_loss", "min"),
@@ -76,6 +79,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--hidden-dim", type=int, default=64, help="Hidden dimension for each view encoder.")
     parser.add_argument("--latent-dim", type=int, default=32, help="Latent dimension for each view encoder.")
+    parser.add_argument(
+        "--message-passing-type",
+        type=str,
+        default="vanilla",
+        choices=sorted(MESSAGE_PASSING_TYPES),
+        help="Message passing type. Default: vanilla.",
+    )
+    parser.add_argument(
+        "--relation-group-scheme",
+        type=str,
+        default="coarse_v1",
+        choices=sorted(RELATION_GROUP_SCHEMES),
+        help="Relation grouping scheme for --message-passing-type=rel_grouped.",
+    )
     parser.add_argument(
         "--decoder-type",
         type=str,
@@ -253,7 +270,20 @@ class SparseGCNLayer(nn.Module):
         return self.linear(propagated)
 
 
-class ViewEncoder(nn.Module):
+class RelationGroupedGCNLayer(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int, num_relations: int) -> None:
+        super().__init__()
+        self.self_linear = nn.Linear(in_dim, out_dim)
+        self.relation_linears = nn.ModuleList([nn.Linear(in_dim, out_dim) for _ in range(num_relations)])
+
+    def forward(self, x: torch.Tensor, relation_adjacencies: List[torch.Tensor]) -> torch.Tensor:
+        out = self.self_linear(x)
+        for adjacency, linear in zip(relation_adjacencies, self.relation_linears):
+            out = out + linear(torch.sparse.mm(adjacency, x))
+        return out / float(len(self.relation_linears) + 1)
+
+
+class VanillaViewEncoder(nn.Module):
     def __init__(self, in_dim: int, hidden_dim: int, latent_dim: int, dropout: float) -> None:
         super().__init__()
         self.layer1 = SparseGCNLayer(in_dim, hidden_dim)
@@ -268,6 +298,21 @@ class ViewEncoder(nn.Module):
         return z
 
 
+class RelationGroupedViewEncoder(nn.Module):
+    def __init__(self, in_dim: int, hidden_dim: int, latent_dim: int, dropout: float, num_relations: int) -> None:
+        super().__init__()
+        self.layer1 = RelationGroupedGCNLayer(in_dim, hidden_dim, num_relations)
+        self.layer2 = RelationGroupedGCNLayer(hidden_dim, latent_dim, num_relations)
+        self.dropout = dropout
+
+    def forward(self, x: torch.Tensor, relation_adjacencies: List[torch.Tensor]) -> torch.Tensor:
+        h = self.layer1(x, relation_adjacencies)
+        h = F.relu(h)
+        h = F.dropout(h, p=self.dropout, training=self.training)
+        z = self.layer2(h, relation_adjacencies)
+        return z
+
+
 class MultiViewFullBatchGAE(nn.Module):
     def __init__(
         self,
@@ -276,13 +321,32 @@ class MultiViewFullBatchGAE(nn.Module):
         dropout: float,
         decoder_type: str = "dot",
         decoder_hidden_dim: int = 64,
+        message_passing_type: str = "vanilla",
+        num_relation_groups: int = 0,
         num_relations: int = 0,
         relation_embedding_dim: int = 16,
     ) -> None:
         super().__init__()
-        self.process_encoder = ViewEncoder(VIEW_INPUT_DIMS["process_view"], hidden_dim, latent_dim, dropout)
-        self.file_encoder = ViewEncoder(VIEW_INPUT_DIMS["file_view"], hidden_dim, latent_dim, dropout)
-        self.network_encoder = ViewEncoder(VIEW_INPUT_DIMS["network_view"], hidden_dim, latent_dim, dropout)
+        self.message_passing_type = message_passing_type
+        if message_passing_type == "vanilla":
+            encoder_cls = VanillaViewEncoder
+            self.process_encoder = encoder_cls(VIEW_INPUT_DIMS["process_view"], hidden_dim, latent_dim, dropout)
+            self.file_encoder = encoder_cls(VIEW_INPUT_DIMS["file_view"], hidden_dim, latent_dim, dropout)
+            self.network_encoder = encoder_cls(VIEW_INPUT_DIMS["network_view"], hidden_dim, latent_dim, dropout)
+        elif message_passing_type == "rel_grouped":
+            if num_relation_groups <= 0:
+                raise ValueError("num_relation_groups must be positive when message_passing_type=rel_grouped")
+            self.process_encoder = RelationGroupedViewEncoder(
+                VIEW_INPUT_DIMS["process_view"], hidden_dim, latent_dim, dropout, num_relation_groups
+            )
+            self.file_encoder = RelationGroupedViewEncoder(
+                VIEW_INPUT_DIMS["file_view"], hidden_dim, latent_dim, dropout, num_relation_groups
+            )
+            self.network_encoder = RelationGroupedViewEncoder(
+                VIEW_INPUT_DIMS["network_view"], hidden_dim, latent_dim, dropout, num_relation_groups
+            )
+        else:
+            raise ValueError(f"Unsupported message passing type: {message_passing_type}")
         self.decoder_type = decoder_type
 
         self.process_gate = nn.Linear(latent_dim, 1)
@@ -306,10 +370,22 @@ class MultiViewFullBatchGAE(nn.Module):
         elif decoder_type != "dot":
             raise ValueError(f"Unsupported decoder type: {decoder_type}")
 
-    def encode(self, x_views: Dict[str, torch.Tensor], adjacency: torch.Tensor) -> Dict[str, torch.Tensor]:
-        z_process = self.process_encoder(x_views["process_view"], adjacency)
-        z_file = self.file_encoder(x_views["file_view"], adjacency)
-        z_network = self.network_encoder(x_views["network_view"], adjacency)
+    def encode(
+        self,
+        x_views: Dict[str, torch.Tensor],
+        adjacency: torch.Tensor,
+        relation_adjacencies: List[torch.Tensor] | None = None,
+    ) -> Dict[str, torch.Tensor]:
+        if self.message_passing_type == "vanilla":
+            z_process = self.process_encoder(x_views["process_view"], adjacency)
+            z_file = self.file_encoder(x_views["file_view"], adjacency)
+            z_network = self.network_encoder(x_views["network_view"], adjacency)
+        else:
+            if relation_adjacencies is None:
+                raise ValueError("relation_adjacencies are required when message_passing_type=rel_grouped")
+            z_process = self.process_encoder(x_views["process_view"], relation_adjacencies)
+            z_file = self.file_encoder(x_views["file_view"], relation_adjacencies)
+            z_network = self.network_encoder(x_views["network_view"], relation_adjacencies)
 
         gate_scores = torch.cat(
             [
@@ -360,7 +436,13 @@ class MultiViewFullBatchGAE(nn.Module):
         return self.edge_decoder(edge_features).squeeze(-1)
 
 
-def prepare_graph_payload(graph_path: Path, device: torch.device, restrict_to_normal_edges: bool) -> Dict[str, object]:
+def prepare_graph_payload(
+    graph_path: Path,
+    device: torch.device,
+    restrict_to_normal_edges: bool,
+    message_passing_type: str = "vanilla",
+    relation_group_scheme: str = "coarse_v1",
+) -> Dict[str, object]:
     graph = load_graph(graph_path)
     summary = summarize_graph(graph)
     views = build_all_view_matrices(graph)
@@ -391,6 +473,19 @@ def prepare_graph_payload(graph_path: Path, device: torch.device, restrict_to_no
         device=device,
     )
 
+    relation_group_names: List[str] = []
+    relation_adjacencies: List[torch.Tensor] | None = None
+    if message_passing_type == "rel_grouped":
+        relation_group_names, relation_adjacencies = build_relation_group_adjacencies(
+            edge_index=edge_index,
+            edge_type=edge_type,
+            num_nodes=int(graph["num_nodes"]),
+            event_type_vocab=graph["event_type_vocab"],
+            edge_weight=edge_weight,
+            scheme=relation_group_scheme,
+            device=device,
+        )
+
     return {
         "path": str(graph_path),
         "name": graph_window_name(graph_path),
@@ -399,6 +494,8 @@ def prepare_graph_payload(graph_path: Path, device: torch.device, restrict_to_no
         "edge_index": edge_index,
         "edge_type": edge_type,
         "adjacency": adjacency,
+        "relation_group_names": relation_group_names,
+        "relation_adjacencies": relation_adjacencies,
         "x_views": x_views,
         "y": y,
         "gt_mask": gt_mask,
@@ -413,7 +510,11 @@ def evaluate_graph(
 ) -> Dict[str, object]:
     model.eval()
     with torch.no_grad():
-        encoded = model.encode(graph_payload["x_views"], graph_payload["adjacency"])
+        encoded = model.encode(
+            graph_payload["x_views"],
+            graph_payload["adjacency"],
+            graph_payload.get("relation_adjacencies"),
+        )
         z_fused = encoded["z_fused"]
 
         positive_edges, positive_edge_type = maybe_cap_edges(
@@ -466,7 +567,11 @@ def train_epoch(
     model.train()
     optimizer.zero_grad(set_to_none=True)
 
-    encoded = model.encode(train_payload["x_views"], train_payload["adjacency"])
+    encoded = model.encode(
+        train_payload["x_views"],
+        train_payload["adjacency"],
+        train_payload.get("relation_adjacencies"),
+    )
     z_fused = encoded["z_fused"]
 
     positive_edges, positive_edge_type = maybe_cap_edges(
@@ -518,9 +623,21 @@ def main() -> None:
     print(f"[train-gnn] train_graph={train_graph_path}", flush=True)
     print(f"[train-gnn] eval_graphs={[str(path) for path in eval_graph_paths]}", flush=True)
 
-    train_payload = prepare_graph_payload(train_graph_path, device=device, restrict_to_normal_edges=True)
+    train_payload = prepare_graph_payload(
+        train_graph_path,
+        device=device,
+        restrict_to_normal_edges=True,
+        message_passing_type=args.message_passing_type,
+        relation_group_scheme=args.relation_group_scheme,
+    )
     eval_payloads = [
-        prepare_graph_payload(path, device=device, restrict_to_normal_edges=False)
+        prepare_graph_payload(
+            path,
+            device=device,
+            restrict_to_normal_edges=False,
+            message_passing_type=args.message_passing_type,
+            relation_group_scheme=args.relation_group_scheme,
+        )
         for path in eval_graph_paths
     ]
 
@@ -533,6 +650,8 @@ def main() -> None:
         dropout=args.dropout,
         decoder_type=args.decoder_type,
         decoder_hidden_dim=args.decoder_hidden_dim,
+        message_passing_type=args.message_passing_type,
+        num_relation_groups=len(train_payload.get("relation_group_names", [])),
         num_relations=int(train_payload["summary"]["event_type_count"]),
         relation_embedding_dim=args.relation_embedding_dim,
     ).to(device)
@@ -551,6 +670,9 @@ def main() -> None:
         "seed": args.seed,
         "hidden_dim": args.hidden_dim,
         "latent_dim": args.latent_dim,
+        "message_passing_type": args.message_passing_type,
+        "relation_group_scheme": args.relation_group_scheme,
+        "num_relation_groups": len(train_payload.get("relation_group_names", [])),
         "decoder_type": args.decoder_type,
         "decoder_hidden_dim": args.decoder_hidden_dim,
         "relation_embedding_dim": args.relation_embedding_dim,

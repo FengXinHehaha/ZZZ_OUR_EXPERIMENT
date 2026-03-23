@@ -8,7 +8,8 @@ Current entrypoints:
 - `train_smoke.py` performs a lightweight device smoke test on a built graph artifact
 - `train_gnn.py` trains a first full-batch multi-view GNN baseline on the built graph artifacts
   and saves the best checkpoint by a selectable metric (default: `val_edge_loss`); decoder options
-  now include `dot`, `mlp`, and relation-aware `rel_mlp`
+  now include `dot`, `mlp`, and relation-aware `rel_mlp`, while message-passing options include
+  vanilla shared-adjacency GCN and lightweight relation-grouped propagation via `rel_grouped`
 - `evaluate_checkpoint.py` exports node-level anomaly scores and top-k summaries from a saved checkpoint
   and now defaults to `top5_mean + robust_zscore_by_type`
 - `summarize_evaluation.py` prints a compact top-k hit summary from an evaluation output directory
@@ -25,3 +26,14 @@ Recommended workflow on the GPU server:
 4. Run `train_smoke.py` first to verify shapes, labels, and device transfer.
 5. Start `train_gnn.py` after the smoke test passes.
 6. Run `evaluate_checkpoint.py`, `summarize_evaluation.py`, `analyze_gt_ranks.py`, `compare_score_aggregations.py`, and `compare_score_calibrations.py` to inspect ranking quality.
+
+Current strongest baseline:
+
+- training: `train_gnn.py --decoder-type dot --message-passing-type vanilla`
+- evaluation: `evaluate_checkpoint.py --score-method top5_mean --score-calibration robust_zscore_by_type`
+
+Lightweight relation-aware message passing:
+
+- `train_gnn.py --message-passing-type rel_grouped --relation-group-scheme coarse_v1`
+- `coarse_v1` splits event types into grouped adjacencies:
+  `file_read / file_write / file_meta / process / network / flow_other`

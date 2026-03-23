@@ -140,12 +140,20 @@ def evaluate_single_graph(
     score_calibration: str,
     topk: List[int],
     window_output_dir: Path,
+    message_passing_type: str,
+    relation_group_scheme: str,
 ) -> Dict[str, object]:
-    payload = prepare_graph_payload(graph_path, device=device, restrict_to_normal_edges=False)
+    payload = prepare_graph_payload(
+        graph_path,
+        device=device,
+        restrict_to_normal_edges=False,
+        message_passing_type=message_passing_type,
+        relation_group_scheme=relation_group_scheme,
+    )
 
     model.eval()
     with torch.no_grad():
-        encoded = model.encode(payload["x_views"], payload["adjacency"])
+        encoded = model.encode(payload["x_views"], payload["adjacency"], payload.get("relation_adjacencies"))
         z_fused = encoded["z_fused"]
 
         positive_edges, positive_edge_type = maybe_cap_edges(
@@ -263,6 +271,8 @@ def main() -> None:
         hidden_dim=int(config["hidden_dim"]),
         latent_dim=int(config["latent_dim"]),
         dropout=float(config["dropout"]),
+        message_passing_type=str(config.get("message_passing_type", "vanilla")),
+        num_relation_groups=int(config.get("num_relation_groups", 0)),
         decoder_type=str(config.get("decoder_type", "dot")),
         decoder_hidden_dim=int(config.get("decoder_hidden_dim", config["latent_dim"] * 2)),
         num_relations=int(config.get("num_relations", 0)),
@@ -299,6 +309,8 @@ def main() -> None:
             score_calibration=args.score_calibration,
             topk=topk,
             window_output_dir=run_dir / window_name,
+            message_passing_type=str(config.get("message_passing_type", "vanilla")),
+            relation_group_scheme=str(config.get("relation_group_scheme", "coarse_v1")),
         )
         aggregate["graphs"].append(summary)
         print(
