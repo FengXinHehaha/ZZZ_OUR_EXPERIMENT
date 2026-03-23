@@ -230,6 +230,10 @@ def main() -> None:
     print(f"[gt-rank-analysis] eval_dir={eval_dir}")
     print(f"[gt-rank-analysis] checkpoint={summary['checkpoint']}")
     print(f"[gt-rank-analysis] checkpoint_epoch={summary['checkpoint_epoch']}")
+    if summary.get("score_method") is not None:
+        print(f"[gt-rank-analysis] score_method={summary['score_method']}")
+    if summary.get("score_calibration") is not None:
+        print(f"[gt-rank-analysis] score_calibration={summary['score_calibration']}")
 
     for graph_summary in summary["graphs"]:
         rows = read_node_scores(Path(graph_summary["node_scores_file"]))

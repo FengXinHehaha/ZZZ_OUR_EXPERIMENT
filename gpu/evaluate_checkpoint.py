@@ -7,6 +7,7 @@ from typing import Dict, List
 
 import torch
 
+from score_calibration import CALIBRATION_METHODS, calibrate_scores_by_method
 from score_aggregation import SCORE_METHODS, compute_node_scores_by_method
 from train_gnn import (
     DEFAULT_EVAL_GRAPHS,
@@ -56,6 +57,13 @@ def parse_args() -> argparse.Namespace:
         default="top5_mean",
         choices=sorted(SCORE_METHODS),
         help="Node anomaly score aggregation. Default: top5_mean.",
+    )
+    parser.add_argument(
+        "--score-calibration",
+        type=str,
+        default="robust_zscore_by_type",
+        choices=sorted(CALIBRATION_METHODS),
+        help="Optional node-type calibration after score aggregation. Default: robust_zscore_by_type.",
     )
     parser.add_argument(
         "--topk",
@@ -128,6 +136,7 @@ def evaluate_single_graph(
     device: torch.device,
     edge_cap: int,
     score_method: str,
+    score_calibration: str,
     topk: List[int],
     window_output_dir: Path,
 ) -> Dict[str, object]:
@@ -157,17 +166,19 @@ def evaluate_single_graph(
         edge_loss = float((pos_loss + neg_loss).item())
 
         edge_error = 1.0 - torch.sigmoid(model.decode_edges(z_fused, payload["edge_index"]))
-        node_scores = compute_node_scores_by_method(
+        base_scores = compute_node_scores_by_method(
             payload["num_nodes"],
             payload["edge_index"].detach().cpu(),
             edge_error.detach().cpu().to(dtype=torch.float32),
             score_method,
         )
-        node_metrics = compute_binary_metrics(payload["y"].detach().cpu().to(dtype=torch.float32), node_scores)
 
         gate_means = encoded["gate_alpha"].mean(dim=0).detach().cpu().tolist()
 
     nodes_rows = read_nodes_table(graph_path.parent / "nodes.tsv")
+    node_types = [row["node_type"] for row in nodes_rows]
+    node_scores = calibrate_scores_by_method(base_scores, node_types, score_calibration)
+    node_metrics = compute_binary_metrics(payload["y"].detach().cpu().to(dtype=torch.float32), node_scores)
     scored_rows: List[Dict[str, object]] = []
     for row in nodes_rows:
         node_id = int(row["node_id"])
@@ -214,6 +225,7 @@ def evaluate_single_graph(
             "network_view": float(gate_means[2]),
         },
         "score_method": score_method,
+        "score_calibration": score_calibration,
         "topk": topk_summary,
         "node_scores_file": str(node_scores_path),
     }
@@ -258,6 +270,7 @@ def main() -> None:
         "best_record": checkpoint.get("best_record"),
         "selection_metric": config.get("selection_metric"),
         "score_method": args.score_method,
+        "score_calibration": args.score_calibration,
         "graphs": [],
     }
 
@@ -271,6 +284,7 @@ def main() -> None:
             device=device,
             edge_cap=args.edge_cap,
             score_method=args.score_method,
+            score_calibration=args.score_calibration,
             topk=topk,
             window_output_dir=run_dir / window_name,
         )
@@ -279,6 +293,7 @@ def main() -> None:
             f"[eval-checkpoint] {window_name}: "
             f"roc_auc={summary['roc_auc']} ap={summary['average_precision']} "
             f"score_method={summary['score_method']} "
+            f"score_calibration={summary['score_calibration']} "
             f"edge_loss={summary['edge_loss']:.6f}",
             flush=True,
         )
