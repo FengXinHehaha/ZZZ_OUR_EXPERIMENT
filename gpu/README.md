@@ -11,6 +11,7 @@ Current entrypoints:
 - `evaluate_checkpoint.py` exports node-level anomaly scores and top-k summaries from a saved checkpoint
 - `summarize_evaluation.py` prints a compact top-k hit summary from an evaluation output directory
 - `analyze_gt_ranks.py` measures where GT nodes land in the ranked anomaly list, including top-ratio coverage
+- `compare_score_aggregations.py` compares multiple node-score aggregations (`mean / max / top-k mean / q90`) on the same checkpoint
 
 Recommended workflow on the GPU server:
 
@@ -19,4 +20,4 @@ Recommended workflow on the GPU server:
 3. Install the GPU-side Python environment and GPU-enabled `torch`.
 4. Run `train_smoke.py` first to verify shapes, labels, and device transfer.
 5. Start `train_gnn.py` after the smoke test passes.
-6. Run `evaluate_checkpoint.py`, `summarize_evaluation.py`, and `analyze_gt_ranks.py` to inspect ranking quality.
+6. Run `evaluate_checkpoint.py`, `summarize_evaluation.py`, `analyze_gt_ranks.py`, and `compare_score_aggregations.py` to inspect ranking quality.
