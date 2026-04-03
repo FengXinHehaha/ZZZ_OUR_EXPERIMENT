@@ -74,6 +74,58 @@ def log(message: str) -> None:
     print(message, flush=True)
 
 
+def normalized_text_sql(expr: str) -> str:
+    return f"LOWER(BTRIM(COALESCE({expr}, '')))"
+
+
+def missing_text_sql(expr: str) -> str:
+    return f"NULLIF(BTRIM(COALESCE({expr}, '')), '') IS NULL"
+
+
+def exec_name_condition(expr: str, category: str) -> str:
+    normalized = normalized_text_sql(expr)
+    if category == "shell":
+        return normalized + " ~ '(^|.*/)(sh|bash|dash|zsh|ksh|csh|tcsh)$'"
+    if category == "interpreter":
+        return normalized + " ~ '(^|.*/)(python([0-9.]*)?|perl|ruby|php|node|java)$'"
+    if category == "network_tool":
+        return normalized + " ~ '(^|.*/)(curl|wget|nc|ncat|netcat|ssh|scp|sftp|ftp|telnet|socat)$'"
+    if category == "package_tool":
+        return normalized + " ~ '(^|.*/)(apt|apt-get|yum|dnf|pip|npm|dpkg|rpm)$'"
+    if category == "system_tool":
+        return normalized + " ~ '(^|.*/)(sudo|su|systemctl|service|mount|chmod|chown|cron)$'"
+    raise ValueError(f"Unsupported exec-name category: {category}")
+
+
+def file_path_condition(expr: str, category: str) -> str:
+    normalized = normalized_text_sql(expr)
+    if category == "temp":
+        return (
+            f"{normalized} LIKE '/tmp/%%' OR {normalized} LIKE '/var/tmp/%%' OR {normalized} LIKE '/dev/shm/%%'"
+        )
+    if category == "config":
+        return f"{normalized} LIKE '/etc/%%'"
+    if category == "system_bin":
+        return (
+            f"{normalized} LIKE '/usr/bin/%%' OR {normalized} LIKE '/bin/%%' "
+            f"OR {normalized} LIKE '/usr/sbin/%%' OR {normalized} LIKE '/sbin/%%'"
+        )
+    if category == "system_lib":
+        return (
+            f"{normalized} LIKE '/usr/lib/%%' OR {normalized} LIKE '/lib/%%' "
+            f"OR {normalized} LIKE '/lib64/%%' OR {normalized} LIKE '/usr/lib64/%%'"
+        )
+    if category == "log":
+        return f"{normalized} LIKE '/var/log/%%'"
+    if category == "user_home":
+        return f"{normalized} LIKE '/home/%%' OR {normalized} LIKE '/root/%%'"
+    if category == "hidden":
+        return f"REGEXP_REPLACE({normalized}, '^.*/', '') LIKE '.%%'"
+    if category == "script":
+        return normalized + " ~ '\\.(sh|bash|zsh|py|pl|rb|php|js)$'"
+    raise ValueError(f"Unsupported file-path category: {category}")
+
+
 def tune_feature_session(conn) -> None:
     with conn.cursor() as cursor:
         cursor.execute("SET work_mem TO '1GB'")
@@ -114,120 +166,6 @@ def copy_query_to_tsv(
     return row_count
 
 
-PROCESS_VIEW_QUERY = """
-WITH base AS MATERIALIZED (
-    SELECT
-        e.subject_uuid AS node_uuid,
-        e.event_type,
-        e.object_uuid,
-        e.object2_uuid
-    FROM events_raw AS e
-    JOIN process_entities AS p
-      ON p.uuid = e.subject_uuid
-    WHERE e.timestamp_ns >= %s
-      AND e.timestamp_ns < %s
-),
-file_refs AS (
-    SELECT node_uuid, COUNT(DISTINCT file_uuid)::bigint AS unique_file_count
-    FROM (
-        SELECT b.node_uuid, b.object_uuid AS file_uuid
-        FROM base AS b
-        JOIN file_entities AS f
-          ON f.uuid = b.object_uuid
-        UNION ALL
-        SELECT b.node_uuid, b.object2_uuid AS file_uuid
-        FROM base AS b
-        JOIN file_entities AS f
-          ON f.uuid = b.object2_uuid
-    ) AS refs
-    GROUP BY node_uuid
-),
-network_refs AS (
-    SELECT node_uuid, COUNT(DISTINCT network_uuid)::bigint AS unique_network_count
-    FROM (
-        SELECT b.node_uuid, b.object_uuid AS network_uuid
-        FROM base AS b
-        JOIN network_entities AS n
-          ON n.uuid = b.object_uuid
-        UNION ALL
-        SELECT b.node_uuid, b.object2_uuid AS network_uuid
-        FROM base AS b
-        JOIN network_entities AS n
-          ON n.uuid = b.object2_uuid
-    ) AS refs
-    GROUP BY node_uuid
-)
-SELECT
-    b.node_uuid,
-    'process'::text AS node_type,
-    COALESCE(p.host_id, '') AS host_id,
-    COALESCE(p.subject_type, '') AS subject_type,
-    COALESCE(p.cmd_line, '') AS cmd_line,
-    CASE
-        WHEN p.parent_subject_uuid IS NULL OR p.parent_subject_uuid = '' THEN 0
-        ELSE 1
-    END AS has_parent_flag,
-    COUNT(*)::bigint AS total_events,
-    COUNT(DISTINCT b.event_type)::bigint AS event_type_diversity,
-    COALESCE(fr.unique_file_count, 0)::bigint AS unique_file_count,
-    COALESCE(nr.unique_network_count, 0)::bigint AS unique_network_count,
-    COUNT(*) FILTER (WHERE b.event_type = 'EVENT_READ')::bigint AS read_count,
-    COUNT(*) FILTER (WHERE b.event_type = 'EVENT_WRITE')::bigint AS write_count,
-    COUNT(*) FILTER (WHERE b.event_type = 'EVENT_OPEN')::bigint AS open_count,
-    COUNT(*) FILTER (WHERE b.event_type = 'EVENT_EXECUTE')::bigint AS execute_count,
-    COUNT(*) FILTER (WHERE b.event_type = 'EVENT_CONNECT')::bigint AS connect_count,
-    COUNT(*) FILTER (WHERE b.event_type IN ('EVENT_SENDTO', 'EVENT_SENDMSG'))::bigint AS send_count,
-    COUNT(*) FILTER (WHERE b.event_type IN ('EVENT_RECVFROM', 'EVENT_RECVMSG'))::bigint AS recv_count,
-    COUNT(*) FILTER (WHERE b.event_type = 'EVENT_ACCEPT')::bigint AS accept_count,
-    COUNT(*) FILTER (WHERE b.event_type = 'EVENT_CREATE_OBJECT')::bigint AS create_object_count,
-    COUNT(*) FILTER (WHERE b.event_type = 'EVENT_FORK')::bigint AS fork_count,
-    COUNT(*) FILTER (WHERE b.event_type = 'EVENT_MMAP')::bigint AS mmap_count,
-    COUNT(*) FILTER (WHERE b.event_type = 'EVENT_MODIFY_PROCESS')::bigint AS modify_process_count,
-    COUNT(*) FILTER (WHERE b.event_type = 'EVENT_CLOSE')::bigint AS close_count,
-    ROUND(
-        (
-            (
-                COUNT(*) FILTER (WHERE b.event_type = 'EVENT_READ') +
-                COUNT(*) FILTER (WHERE b.event_type = 'EVENT_WRITE') +
-                COUNT(*) FILTER (WHERE b.event_type = 'EVENT_OPEN') +
-                COUNT(*) FILTER (WHERE b.event_type = 'EVENT_EXECUTE')
-            )::numeric
-        ) / NULLIF(COUNT(*), 0),
-        6
-    ) AS file_interaction_ratio,
-    ROUND(
-        (
-            (
-                COUNT(*) FILTER (WHERE b.event_type = 'EVENT_CONNECT') +
-                COUNT(*) FILTER (WHERE b.event_type IN ('EVENT_SENDTO', 'EVENT_SENDMSG')) +
-                COUNT(*) FILTER (WHERE b.event_type IN ('EVENT_RECVFROM', 'EVENT_RECVMSG')) +
-                COUNT(*) FILTER (WHERE b.event_type = 'EVENT_ACCEPT')
-            )::numeric
-        ) / NULLIF(COUNT(*), 0),
-        6
-    ) AS network_interaction_ratio,
-    ROUND(
-        (COUNT(*) FILTER (WHERE b.event_type = 'EVENT_FORK'))::numeric / NULLIF(COUNT(*), 0),
-        6
-    ) AS fork_ratio
-FROM base AS b
-JOIN process_entities AS p
-  ON p.uuid = b.node_uuid
-LEFT JOIN file_refs AS fr
-  ON fr.node_uuid = b.node_uuid
-LEFT JOIN network_refs AS nr
-  ON nr.node_uuid = b.node_uuid
-GROUP BY
-    b.node_uuid,
-    p.host_id,
-    p.subject_type,
-    p.cmd_line,
-    p.parent_subject_uuid,
-    fr.unique_file_count,
-    nr.unique_network_count
-"""
-
-
 PROCESS_VIEW_EXPORT_FROM_TEMP_QUERY = """
 WITH event_type_counts AS (
     SELECT node_uuid, COUNT(*)::bigint AS event_type_diversity
@@ -243,13 +181,17 @@ network_counts AS (
     SELECT node_uuid, COUNT(*)::bigint AS unique_network_count
     FROM tmp_process_network_refs
     GROUP BY node_uuid
+),
+exec_name_counts AS (
+    SELECT node_uuid, COUNT(*)::bigint AS unique_exec_name_count
+    FROM tmp_process_exec_names
+    GROUP BY node_uuid
 )
 SELECT
     s.node_uuid,
     'process'::text AS node_type,
     COALESCE(p.host_id, '') AS host_id,
     COALESCE(p.subject_type, '') AS subject_type,
-    COALESCE(p.cmd_line, '') AS cmd_line,
     CASE
         WHEN p.parent_subject_uuid IS NULL OR p.parent_subject_uuid = '' THEN 0
         ELSE 1
@@ -271,6 +213,13 @@ SELECT
     s.mmap_count,
     s.modify_process_count,
     s.close_count,
+    COALESCE(enc.unique_exec_name_count, 0)::bigint AS unique_exec_name_count,
+    s.shell_exec_count,
+    s.interpreter_exec_count,
+    s.network_tool_exec_count,
+    s.package_tool_exec_count,
+    s.system_tool_exec_count,
+    s.missing_exec_name_count,
     ROUND(
         (s.read_count + s.write_count + s.open_count + s.execute_count)::numeric / NULLIF(s.total_events, 0),
         6
@@ -289,15 +238,22 @@ LEFT JOIN file_counts AS fc
   ON fc.node_uuid = s.node_uuid
 LEFT JOIN network_counts AS nc
   ON nc.node_uuid = s.node_uuid
+LEFT JOIN exec_name_counts AS enc
+  ON enc.node_uuid = s.node_uuid
 """
 
 
-FILE_VIEW_QUERY = """
+FILE_VIEW_QUERY = f"""
 WITH file_hits AS (
     SELECT
         e.subject_uuid AS process_uuid,
         e.object_uuid AS node_uuid,
-        e.event_type
+        e.event_type,
+        COALESCE(
+            NULLIF(BTRIM(COALESCE(e.object_path, '')), ''),
+            NULLIF(BTRIM(COALESCE(e.file_descriptor, '')), ''),
+            ''
+        ) AS path_text
     FROM events_raw AS e
     JOIN file_entities AS f
       ON f.uuid = e.object_uuid
@@ -307,7 +263,12 @@ WITH file_hits AS (
     SELECT
         e.subject_uuid AS process_uuid,
         e.object2_uuid AS node_uuid,
-        e.event_type
+        e.event_type,
+        COALESCE(
+            NULLIF(BTRIM(COALESCE(e.object2_path, '')), ''),
+            NULLIF(BTRIM(COALESCE(e.file_descriptor, '')), ''),
+            ''
+        ) AS path_text
     FROM events_raw AS e
     JOIN file_entities AS f
       ON f.uuid = e.object2_uuid
@@ -319,12 +280,11 @@ SELECT
     'file'::text AS node_type,
     COALESCE(f.host_id, '') AS host_id,
     COALESCE(f.file_type, '') AS file_type,
-    COALESCE(f.file_descriptor, '') AS file_descriptor,
-    COALESCE(f.permission_value, '') AS permission_value,
     COALESCE(f.size_bytes, 0)::bigint AS size_bytes,
     COUNT(*)::bigint AS total_accesses,
     COUNT(DISTINCT h.process_uuid)::bigint AS unique_process_count,
     COUNT(DISTINCT h.event_type)::bigint AS event_type_diversity,
+    COUNT(DISTINCT NULLIF(BTRIM(COALESCE(h.path_text, '')), ''))::bigint AS unique_known_path_count,
     COUNT(*) FILTER (WHERE h.event_type = 'EVENT_READ')::bigint AS read_count,
     COUNT(*) FILTER (WHERE h.event_type = 'EVENT_WRITE')::bigint AS write_count,
     COUNT(*) FILTER (WHERE h.event_type = 'EVENT_OPEN')::bigint AS open_count,
@@ -334,6 +294,15 @@ SELECT
     COUNT(*) FILTER (WHERE h.event_type = 'EVENT_UNLINK')::bigint AS unlink_count,
     COUNT(*) FILTER (WHERE h.event_type = 'EVENT_RENAME')::bigint AS rename_count,
     COUNT(*) FILTER (WHERE h.event_type = 'EVENT_MODIFY_FILE_ATTRIBUTES')::bigint AS modify_file_attr_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "temp")})::bigint AS temp_path_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "config")})::bigint AS config_path_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "system_bin")})::bigint AS system_bin_path_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "system_lib")})::bigint AS system_lib_path_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "log")})::bigint AS log_path_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "user_home")})::bigint AS user_home_path_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "hidden")})::bigint AS hidden_path_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "script")})::bigint AS script_path_count,
+    COUNT(*) FILTER (WHERE {missing_text_sql("h.path_text")})::bigint AS missing_path_count,
     ROUND((COUNT(*) FILTER (WHERE h.event_type = 'EVENT_READ'))::numeric / NULLIF(COUNT(*), 0), 6) AS read_ratio,
     ROUND((COUNT(*) FILTER (WHERE h.event_type = 'EVENT_WRITE'))::numeric / NULLIF(COUNT(*), 0), 6) AS write_ratio,
     ROUND((COUNT(*) FILTER (WHERE h.event_type = 'EVENT_EXECUTE'))::numeric / NULLIF(COUNT(*), 0), 6) AS execute_ratio,
@@ -341,7 +310,7 @@ SELECT
 FROM file_hits AS h
 JOIN file_entities AS f
   ON f.uuid = h.node_uuid
-GROUP BY h.node_uuid, f.host_id, f.file_type, f.file_descriptor, f.permission_value, f.size_bytes
+GROUP BY h.node_uuid, f.host_id, f.file_type, f.size_bytes
 """
 
 
@@ -400,7 +369,6 @@ SELECT
         THEN 'no'
         ELSE 'yes'
     END AS external_remote_ip_flag,
-    COALESCE(n.ip_protocol, '') AS ip_protocol,
     COUNT(*)::bigint AS total_net_events,
     COUNT(DISTINCT h.process_uuid)::bigint AS unique_process_count,
     COUNT(DISTINCT h.event_type)::bigint AS event_type_diversity,
@@ -426,17 +394,21 @@ GROUP BY
     n.local_address,
     n.remote_address,
     n.local_port,
-    n.remote_port,
-    n.ip_protocol
+    n.remote_port
 """
 
 
-PROCESS_VIEW_FILE_NODE_QUERY = """
+PROCESS_VIEW_FILE_NODE_QUERY = f"""
 WITH file_hits AS (
     SELECT
         e.subject_uuid AS process_uuid,
         e.object_uuid AS node_uuid,
-        e.event_type
+        e.event_type,
+        COALESCE(
+            NULLIF(BTRIM(COALESCE(e.object_path, '')), ''),
+            NULLIF(BTRIM(COALESCE(e.file_descriptor, '')), ''),
+            ''
+        ) AS path_text
     FROM events_raw AS e
     JOIN file_entities AS f
       ON f.uuid = e.object_uuid
@@ -446,7 +418,12 @@ WITH file_hits AS (
     SELECT
         e.subject_uuid AS process_uuid,
         e.object2_uuid AS node_uuid,
-        e.event_type
+        e.event_type,
+        COALESCE(
+            NULLIF(BTRIM(COALESCE(e.object2_path, '')), ''),
+            NULLIF(BTRIM(COALESCE(e.file_descriptor, '')), ''),
+            ''
+        ) AS path_text
     FROM events_raw AS e
     JOIN file_entities AS f
       ON f.uuid = e.object2_uuid
@@ -474,12 +451,11 @@ SELECT
     'file'::text AS node_type,
     COALESCE(f.host_id, '') AS host_id,
     COALESCE(f.file_type, '') AS file_type,
-    COALESCE(f.file_descriptor, '') AS file_descriptor,
-    COALESCE(f.permission_value, '') AS permission_value,
     COALESCE(f.size_bytes, 0)::bigint AS size_bytes,
     COUNT(*)::bigint AS total_process_context_events,
     COUNT(DISTINCT h.process_uuid)::bigint AS unique_process_count,
     COUNT(DISTINCT h.event_type)::bigint AS event_type_diversity,
+    COUNT(DISTINCT NULLIF(BTRIM(COALESCE(h.path_text, '')), ''))::bigint AS unique_known_path_count,
     COUNT(DISTINCT h.process_uuid) FILTER (WHERE h.event_type = 'EVENT_READ')::bigint AS read_by_process_count,
     COUNT(DISTINCT h.process_uuid) FILTER (WHERE h.event_type = 'EVENT_WRITE')::bigint AS write_by_process_count,
     COUNT(DISTINCT h.process_uuid) FILTER (WHERE h.event_type = 'EVENT_OPEN')::bigint AS open_by_process_count,
@@ -488,6 +464,15 @@ SELECT
     COUNT(*) FILTER (WHERE h.event_type = 'EVENT_WRITE')::bigint AS write_count,
     COUNT(*) FILTER (WHERE h.event_type = 'EVENT_OPEN')::bigint AS open_count,
     COUNT(*) FILTER (WHERE h.event_type = 'EVENT_EXECUTE')::bigint AS execute_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "temp")})::bigint AS temp_path_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "config")})::bigint AS config_path_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "system_bin")})::bigint AS system_bin_path_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "system_lib")})::bigint AS system_lib_path_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "log")})::bigint AS log_path_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "user_home")})::bigint AS user_home_path_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "hidden")})::bigint AS hidden_path_count,
+    COUNT(*) FILTER (WHERE {file_path_condition("h.path_text", "script")})::bigint AS script_path_count,
+    COUNT(*) FILTER (WHERE {missing_text_sql("h.path_text")})::bigint AS missing_path_count,
     COUNT(DISTINCT h.process_uuid) FILTER (WHERE COALESCE(pns.total_network_events, 0) > 0)::bigint AS network_active_process_count,
     ROUND(AVG(COALESCE(pns.total_network_events, 0)::numeric), 6) AS avg_network_events_of_accessing_processes,
     MAX(COALESCE(pns.total_network_events, 0))::bigint AS max_network_events_of_accessing_processes,
@@ -501,7 +486,7 @@ JOIN file_entities AS f
   ON f.uuid = h.node_uuid
 LEFT JOIN process_network_stats AS pns
   ON pns.process_uuid = h.process_uuid
-GROUP BY h.node_uuid, f.host_id, f.file_type, f.file_descriptor, f.permission_value, f.size_bytes
+GROUP BY h.node_uuid, f.host_id, f.file_type, f.size_bytes
 """
 
 
@@ -573,7 +558,6 @@ SELECT
         THEN 'no'
         ELSE 'yes'
     END AS external_remote_ip_flag,
-    COALESCE(n.ip_protocol, '') AS ip_protocol,
     COUNT(*)::bigint AS total_process_context_events,
     COUNT(DISTINCT h.process_uuid)::bigint AS unique_process_count,
     COUNT(DISTINCT h.event_type)::bigint AS event_type_diversity,
@@ -601,17 +585,17 @@ GROUP BY
     n.local_address,
     n.remote_address,
     n.local_port,
-    n.remote_port,
-    n.ip_protocol
+    n.remote_port
 """
 
 
-FILE_VIEW_PROCESS_NODE_QUERY = """
+FILE_VIEW_PROCESS_NODE_QUERY = f"""
 WITH file_hits AS (
     SELECT
         e.subject_uuid AS node_uuid,
         e.object_uuid AS file_uuid,
-        e.event_type
+        e.event_type,
+        e.exec_name
     FROM events_raw AS e
     JOIN file_entities AS f
       ON f.uuid = e.object_uuid
@@ -621,7 +605,8 @@ WITH file_hits AS (
     SELECT
         e.subject_uuid AS node_uuid,
         e.object2_uuid AS file_uuid,
-        e.event_type
+        e.event_type,
+        e.exec_name
     FROM events_raw AS e
     JOIN file_entities AS f
       ON f.uuid = e.object2_uuid
@@ -633,7 +618,6 @@ SELECT
     'process'::text AS node_type,
     COALESCE(p.host_id, '') AS host_id,
     COALESCE(p.subject_type, '') AS subject_type,
-    COALESCE(p.cmd_line, '') AS cmd_line,
     CASE
         WHEN p.parent_subject_uuid IS NULL OR p.parent_subject_uuid = '' THEN 0
         ELSE 1
@@ -650,6 +634,13 @@ SELECT
     COUNT(*) FILTER (WHERE h.event_type = 'EVENT_UNLINK')::bigint AS unlink_count,
     COUNT(*) FILTER (WHERE h.event_type = 'EVENT_RENAME')::bigint AS rename_count,
     COUNT(*) FILTER (WHERE h.event_type = 'EVENT_MODIFY_FILE_ATTRIBUTES')::bigint AS modify_file_attr_count,
+    COUNT(DISTINCT NULLIF(BTRIM(COALESCE(h.exec_name, '')), ''))::bigint AS unique_exec_name_count,
+    COUNT(*) FILTER (WHERE {exec_name_condition("h.exec_name", "shell")})::bigint AS shell_exec_count,
+    COUNT(*) FILTER (WHERE {exec_name_condition("h.exec_name", "interpreter")})::bigint AS interpreter_exec_count,
+    COUNT(*) FILTER (WHERE {exec_name_condition("h.exec_name", "network_tool")})::bigint AS network_tool_exec_count,
+    COUNT(*) FILTER (WHERE {exec_name_condition("h.exec_name", "package_tool")})::bigint AS package_tool_exec_count,
+    COUNT(*) FILTER (WHERE {exec_name_condition("h.exec_name", "system_tool")})::bigint AS system_tool_exec_count,
+    COUNT(*) FILTER (WHERE {missing_text_sql("h.exec_name")})::bigint AS missing_exec_name_count,
     COUNT(DISTINCT h.file_uuid) FILTER (WHERE h.event_type = 'EVENT_READ')::bigint AS unique_read_file_count,
     COUNT(DISTINCT h.file_uuid) FILTER (WHERE h.event_type = 'EVENT_WRITE')::bigint AS unique_write_file_count,
     ROUND((COUNT(*) FILTER (WHERE h.event_type = 'EVENT_READ'))::numeric / NULLIF(COUNT(*), 0), 6) AS read_ratio,
@@ -658,16 +649,17 @@ SELECT
 FROM file_hits AS h
 JOIN process_entities AS p
   ON p.uuid = h.node_uuid
-GROUP BY h.node_uuid, p.host_id, p.subject_type, p.cmd_line, p.parent_subject_uuid
+GROUP BY h.node_uuid, p.host_id, p.subject_type, p.parent_subject_uuid
 """
 
 
-NETWORK_VIEW_PROCESS_NODE_QUERY = """
+NETWORK_VIEW_PROCESS_NODE_QUERY = f"""
 WITH network_hits AS (
     SELECT
         e.subject_uuid AS node_uuid,
         e.object_uuid AS network_uuid,
-        e.event_type
+        e.event_type,
+        e.exec_name
     FROM events_raw AS e
     JOIN network_entities AS n
       ON n.uuid = e.object_uuid
@@ -677,7 +669,8 @@ WITH network_hits AS (
     SELECT
         e.subject_uuid AS node_uuid,
         e.object2_uuid AS network_uuid,
-        e.event_type
+        e.event_type,
+        e.exec_name
     FROM events_raw AS e
     JOIN network_entities AS n
       ON n.uuid = e.object2_uuid
@@ -686,12 +679,13 @@ WITH network_hits AS (
 ),
 network_hit_enriched AS (
     SELECT
-        h.node_uuid,
-        h.network_uuid,
-        h.event_type,
-        n.remote_address,
-        n.remote_port,
-        CASE
+    h.node_uuid,
+    h.network_uuid,
+    h.event_type,
+    h.exec_name,
+    n.remote_address,
+    n.remote_port,
+    CASE
             WHEN NULLIF(BTRIM(COALESCE(n.remote_address, '')), '') IS NULL THEN 'unknown'
             WHEN n.remote_address !~ '^[0-9]{1,3}(\\.[0-9]{1,3}){3}$' THEN 'unknown'
             WHEN inet(n.remote_address) << inet '10.0.0.0/8'
@@ -711,7 +705,6 @@ SELECT
     'process'::text AS node_type,
     COALESCE(p.host_id, '') AS host_id,
     COALESCE(p.subject_type, '') AS subject_type,
-    COALESCE(p.cmd_line, '') AS cmd_line,
     CASE
         WHEN p.parent_subject_uuid IS NULL OR p.parent_subject_uuid = '' THEN 0
         ELSE 1
@@ -727,6 +720,13 @@ SELECT
     COUNT(*) FILTER (WHERE h.event_type IN ('EVENT_SENDTO', 'EVENT_SENDMSG'))::bigint AS send_count,
     COUNT(*) FILTER (WHERE h.event_type IN ('EVENT_RECVFROM', 'EVENT_RECVMSG'))::bigint AS recv_count,
     COUNT(*) FILTER (WHERE h.event_type = 'EVENT_CLOSE')::bigint AS close_count,
+    COUNT(DISTINCT NULLIF(BTRIM(COALESCE(h.exec_name, '')), ''))::bigint AS unique_exec_name_count,
+    COUNT(*) FILTER (WHERE {exec_name_condition("h.exec_name", "shell")})::bigint AS shell_exec_count,
+    COUNT(*) FILTER (WHERE {exec_name_condition("h.exec_name", "interpreter")})::bigint AS interpreter_exec_count,
+    COUNT(*) FILTER (WHERE {exec_name_condition("h.exec_name", "network_tool")})::bigint AS network_tool_exec_count,
+    COUNT(*) FILTER (WHERE {exec_name_condition("h.exec_name", "package_tool")})::bigint AS package_tool_exec_count,
+    COUNT(*) FILTER (WHERE {exec_name_condition("h.exec_name", "system_tool")})::bigint AS system_tool_exec_count,
+    COUNT(*) FILTER (WHERE {missing_text_sql("h.exec_name")})::bigint AS missing_exec_name_count,
     COUNT(DISTINCT h.network_uuid) FILTER (WHERE h.external_remote_ip_flag = 'yes')::bigint AS external_network_count,
     ROUND(
         (COUNT(DISTINCT h.network_uuid) FILTER (WHERE h.external_remote_ip_flag = 'yes'))::numeric /
@@ -739,7 +739,7 @@ SELECT
 FROM network_hit_enriched AS h
 JOIN process_entities AS p
   ON p.uuid = h.node_uuid
-GROUP BY h.node_uuid, p.host_id, p.subject_type, p.cmd_line, p.parent_subject_uuid
+GROUP BY h.node_uuid, p.host_id, p.subject_type, p.parent_subject_uuid
 """
 
 
@@ -766,6 +766,7 @@ def create_process_temp_tables(conn) -> None:
         cursor.execute("DROP TABLE IF EXISTS tmp_process_event_types")
         cursor.execute("DROP TABLE IF EXISTS tmp_process_file_refs")
         cursor.execute("DROP TABLE IF EXISTS tmp_process_network_refs")
+        cursor.execute("DROP TABLE IF EXISTS tmp_process_exec_names")
 
         cursor.execute(
             """
@@ -784,7 +785,13 @@ def create_process_temp_tables(conn) -> None:
                 fork_count BIGINT NOT NULL DEFAULT 0,
                 mmap_count BIGINT NOT NULL DEFAULT 0,
                 modify_process_count BIGINT NOT NULL DEFAULT 0,
-                close_count BIGINT NOT NULL DEFAULT 0
+                close_count BIGINT NOT NULL DEFAULT 0,
+                shell_exec_count BIGINT NOT NULL DEFAULT 0,
+                interpreter_exec_count BIGINT NOT NULL DEFAULT 0,
+                network_tool_exec_count BIGINT NOT NULL DEFAULT 0,
+                package_tool_exec_count BIGINT NOT NULL DEFAULT 0,
+                system_tool_exec_count BIGINT NOT NULL DEFAULT 0,
+                missing_exec_name_count BIGINT NOT NULL DEFAULT 0
             )
             """
         )
@@ -815,13 +822,22 @@ def create_process_temp_tables(conn) -> None:
             )
             """
         )
+        cursor.execute(
+            """
+            CREATE TEMP TABLE tmp_process_exec_names (
+                node_uuid VARCHAR(255) NOT NULL,
+                exec_name VARCHAR(512) NOT NULL,
+                PRIMARY KEY (node_uuid, exec_name)
+            )
+            """
+        )
     conn.commit()
 
 
 def accumulate_process_window_day(conn, start_ns: int, end_ns: int) -> None:
     with conn.cursor() as cursor:
         cursor.execute(
-            """
+            f"""
             INSERT INTO tmp_process_stats (
                 node_uuid,
                 total_events,
@@ -837,7 +853,13 @@ def accumulate_process_window_day(conn, start_ns: int, end_ns: int) -> None:
                 fork_count,
                 mmap_count,
                 modify_process_count,
-                close_count
+                close_count,
+                shell_exec_count,
+                interpreter_exec_count,
+                network_tool_exec_count,
+                package_tool_exec_count,
+                system_tool_exec_count,
+                missing_exec_name_count
             )
             SELECT
                 e.subject_uuid AS node_uuid,
@@ -854,7 +876,13 @@ def accumulate_process_window_day(conn, start_ns: int, end_ns: int) -> None:
                 COUNT(*) FILTER (WHERE e.event_type = 'EVENT_FORK')::bigint AS fork_count,
                 COUNT(*) FILTER (WHERE e.event_type = 'EVENT_MMAP')::bigint AS mmap_count,
                 COUNT(*) FILTER (WHERE e.event_type = 'EVENT_MODIFY_PROCESS')::bigint AS modify_process_count,
-                COUNT(*) FILTER (WHERE e.event_type = 'EVENT_CLOSE')::bigint AS close_count
+                COUNT(*) FILTER (WHERE e.event_type = 'EVENT_CLOSE')::bigint AS close_count,
+                COUNT(*) FILTER (WHERE {exec_name_condition("e.exec_name", "shell")})::bigint AS shell_exec_count,
+                COUNT(*) FILTER (WHERE {exec_name_condition("e.exec_name", "interpreter")})::bigint AS interpreter_exec_count,
+                COUNT(*) FILTER (WHERE {exec_name_condition("e.exec_name", "network_tool")})::bigint AS network_tool_exec_count,
+                COUNT(*) FILTER (WHERE {exec_name_condition("e.exec_name", "package_tool")})::bigint AS package_tool_exec_count,
+                COUNT(*) FILTER (WHERE {exec_name_condition("e.exec_name", "system_tool")})::bigint AS system_tool_exec_count,
+                COUNT(*) FILTER (WHERE {missing_text_sql("e.exec_name")})::bigint AS missing_exec_name_count
             FROM events_raw AS e
             JOIN process_entities AS p
               ON p.uuid = e.subject_uuid
@@ -876,7 +904,13 @@ def accumulate_process_window_day(conn, start_ns: int, end_ns: int) -> None:
                 fork_count = tmp_process_stats.fork_count + EXCLUDED.fork_count,
                 mmap_count = tmp_process_stats.mmap_count + EXCLUDED.mmap_count,
                 modify_process_count = tmp_process_stats.modify_process_count + EXCLUDED.modify_process_count,
-                close_count = tmp_process_stats.close_count + EXCLUDED.close_count
+                close_count = tmp_process_stats.close_count + EXCLUDED.close_count,
+                shell_exec_count = tmp_process_stats.shell_exec_count + EXCLUDED.shell_exec_count,
+                interpreter_exec_count = tmp_process_stats.interpreter_exec_count + EXCLUDED.interpreter_exec_count,
+                network_tool_exec_count = tmp_process_stats.network_tool_exec_count + EXCLUDED.network_tool_exec_count,
+                package_tool_exec_count = tmp_process_stats.package_tool_exec_count + EXCLUDED.package_tool_exec_count,
+                system_tool_exec_count = tmp_process_stats.system_tool_exec_count + EXCLUDED.system_tool_exec_count,
+                missing_exec_name_count = tmp_process_stats.missing_exec_name_count + EXCLUDED.missing_exec_name_count
             """,
             (start_ns, end_ns),
         )
@@ -954,6 +988,23 @@ def accumulate_process_window_day(conn, start_ns: int, end_ns: int) -> None:
               ON n.uuid = e.object2_uuid
             WHERE e.timestamp_ns >= %s
               AND e.timestamp_ns < %s
+            ON CONFLICT DO NOTHING
+            """,
+            (start_ns, end_ns),
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO tmp_process_exec_names (node_uuid, exec_name)
+            SELECT DISTINCT
+                e.subject_uuid,
+                LOWER(BTRIM(e.exec_name)) AS exec_name
+            FROM events_raw AS e
+            JOIN process_entities AS p
+              ON p.uuid = e.subject_uuid
+            WHERE e.timestamp_ns >= %s
+              AND e.timestamp_ns < %s
+              AND NULLIF(BTRIM(COALESCE(e.exec_name, '')), '') IS NOT NULL
             ON CONFLICT DO NOTHING
             """,
             (start_ns, end_ns),

@@ -99,6 +99,7 @@ Current fields:
 - `total_process_context_events`
 - `unique_process_count`
 - `event_type_diversity`
+- `unique_known_path_count`
 - `read_by_process_count`
 - `write_by_process_count`
 - `open_by_process_count`
@@ -107,6 +108,15 @@ Current fields:
 - `write_count`
 - `open_count`
 - `execute_count`
+- `temp_path_count`
+- `config_path_count`
+- `system_bin_path_count`
+- `system_lib_path_count`
+- `log_path_count`
+- `user_home_path_count`
+- `hidden_path_count`
+- `script_path_count`
+- `missing_path_count`
 - `network_active_process_count`
 - `avg_network_events_of_accessing_processes`
 - `max_network_events_of_accessing_processes`
@@ -116,8 +126,6 @@ Static columns from local `file_entities` are also kept:
 
 - `host_id`
 - `file_type`
-- `file_descriptor`
-- `permission_value`
 - `size_bytes`
 
 ### `file_view__file_node`
@@ -129,6 +137,7 @@ Current fields:
 - `total_accesses`
 - `unique_process_count`
 - `event_type_diversity`
+- `unique_known_path_count`
 - `read_count`
 - `write_count`
 - `open_count`
@@ -138,6 +147,15 @@ Current fields:
 - `unlink_count`
 - `rename_count`
 - `modify_file_attr_count`
+- `temp_path_count`
+- `config_path_count`
+- `system_bin_path_count`
+- `system_lib_path_count`
+- `log_path_count`
+- `user_home_path_count`
+- `hidden_path_count`
+- `script_path_count`
+- `missing_path_count`
 - `read_ratio`
 - `write_ratio`
 - `execute_ratio`
@@ -147,8 +165,6 @@ Static columns from local `file_entities` are also kept:
 
 - `host_id`
 - `file_type`
-- `file_descriptor`
-- `permission_value`
 - `size_bytes`
 
 ### `process_view__network_node`
@@ -179,7 +195,6 @@ Static columns from local `network_entities` are also kept:
 - `local_port_bucket`
 - `remote_port_bucket`
 - `external_remote_ip_flag`
-- `ip_protocol`
 
 ### `file_view__process_node`
 
@@ -199,6 +214,13 @@ Current fields:
 - `unlink_count`
 - `rename_count`
 - `modify_file_attr_count`
+- `unique_exec_name_count`
+- `shell_exec_count`
+- `interpreter_exec_count`
+- `network_tool_exec_count`
+- `package_tool_exec_count`
+- `system_tool_exec_count`
+- `missing_exec_name_count`
 - `unique_read_file_count`
 - `unique_write_file_count`
 - `read_ratio`
@@ -209,7 +231,6 @@ Static columns from local `process_entities` are also kept:
 
 - `host_id`
 - `subject_type`
-- `cmd_line`
 - `has_parent_flag`
 
 ### `network_view__network_node`
@@ -240,7 +261,6 @@ Static columns from local `network_entities` are also kept:
 - `local_port_bucket`
 - `remote_port_bucket`
 - `external_remote_ip_flag`
-- `ip_protocol`
 
 ### `network_view__process_node`
 
@@ -259,6 +279,13 @@ Current fields:
 - `send_count`
 - `recv_count`
 - `close_count`
+- `unique_exec_name_count`
+- `shell_exec_count`
+- `interpreter_exec_count`
+- `network_tool_exec_count`
+- `package_tool_exec_count`
+- `system_tool_exec_count`
+- `missing_exec_name_count`
 - `external_network_count`
 - `external_network_ratio`
 - `high_risk_port_contact_count`
@@ -267,23 +294,24 @@ Static columns from local `process_entities` are also kept:
 
 - `host_id`
 - `subject_type`
-- `cmd_line`
 - `has_parent_flag`
 
 ## Semantic Source Fields
 
-The extraction stage now also preserves two high-cardinality source fields that are not meant to be
-one-hot encoded directly:
+The extraction stage now derives semantic aggregates from stable event-level fields instead of
+entity-table text columns that are mostly null in CADETS E3.
 
-- `cmd_line` for process-node groups
-- `file_descriptor` for file-node groups
+Current event-level semantic sources:
 
-These fields are carried forward into the cleaning stage so the encoding stage can derive compact
-semantic buckets from them, such as:
+- `exec_name` for process-node groups
+- `object_path` and `object2_path` for file-node groups
+- `remote_address` and `remote_port` for network-node groups
 
-- process command behavior buckets
-- file path / extension buckets
-- hidden-file flags
+These semantics are turned into compact numeric counts during extraction, such as:
+
+- process executable-family counts
+- file path-region / hidden / script counts
+- network endpoint scope / service buckets
 
 ## Why Seven Groups For Now
 

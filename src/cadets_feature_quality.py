@@ -13,16 +13,12 @@ TEXT_COLUMNS = {
     "node_type",
     "host_id",
     "subject_type",
-    "cmd_line",
     "file_type",
-    "file_descriptor",
-    "permission_value",
     "local_address",
     "remote_address",
     "local_port_bucket",
     "remote_port_bucket",
     "external_remote_ip_flag",
-    "ip_protocol",
 }
 
 

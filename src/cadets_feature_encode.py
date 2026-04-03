@@ -2,7 +2,6 @@ import argparse
 import csv
 import ipaddress
 import json
-import os
 from pathlib import Path
 from typing import Callable, Dict, List
 
@@ -15,59 +14,27 @@ DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "artifacts" / "featur
 RAW_METADATA_COLUMNS = {"node_uuid", "node_type"}
 
 RAW_CATEGORICAL_CANDIDATES = {
-    "process_view__file_node": ["file_type", "permission_value"],
-    "file_view__file_node": ["file_type", "permission_value"],
+    "process_view__file_node": ["file_type"],
+    "file_view__file_node": ["file_type"],
     "process_view__network_node": [
         "local_port_bucket",
         "remote_port_bucket",
         "external_remote_ip_flag",
-        "ip_protocol",
     ],
     "network_view__network_node": [
         "local_port_bucket",
         "remote_port_bucket",
         "external_remote_ip_flag",
-        "ip_protocol",
     ],
     "file_view__process_node": ["subject_type"],
     "network_view__process_node": ["subject_type"],
     "process_view__process_node": ["subject_type"],
 }
 
-PROCESS_GROUPS = {
-    "process_view__process_node",
-    "file_view__process_node",
-    "network_view__process_node",
-}
-
-FILE_GROUPS = {
-    "process_view__file_node",
-    "file_view__file_node",
-}
-
 NETWORK_GROUPS = {
     "process_view__network_node",
     "network_view__network_node",
 }
-
-NETWORK_TOOL_PATTERNS = (
-    "curl",
-    "wget",
-    "nc ",
-    "ncat",
-    "netcat",
-    "ssh",
-    "scp",
-    "sftp",
-    "ftp",
-    "telnet",
-    "socat",
-)
-
-INTERPRETER_PATTERNS = ("python", "perl", "ruby", "php", "node", "java")
-PACKAGE_TOOL_PATTERNS = ("apt", "apt-get", "yum", "dnf", "pip", "npm", "dpkg", "rpm")
-SYSTEM_TOOL_PATTERNS = ("sudo", "su ", "systemctl", "service ", "mount", "chmod", "chown", "cron")
-PIPE_TOKENS = ("|", "&&", ";", "$(", "`")
 
 FeatureBuilder = Callable[[Dict[str, str]], str]
 
@@ -109,98 +76,6 @@ def normalize_category(value: str) -> str:
 
 def raw_column_builder(column: str) -> FeatureBuilder:
     return lambda row, column=column: normalize_category(row.get(column, ""))
-
-
-def classify_cmd_semantic(cmd_line: str) -> str:
-    text = cmd_line.strip().lower()
-    if not text:
-        return "unknown"
-    if any(token in text for token in NETWORK_TOOL_PATTERNS):
-        return "network_tool"
-    if any(token in text for token in INTERPRETER_PATTERNS):
-        return "interpreter"
-    if any(token in text for token in PACKAGE_TOOL_PATTERNS):
-        return "package_tool"
-    if any(token in text for token in SYSTEM_TOOL_PATTERNS):
-        return "system_tool"
-    first_token = os.path.basename(text.split()[0])
-    if first_token in {"sh", "bash", "dash", "zsh", "ksh", "csh", "tcsh"}:
-        return "shell"
-    return "other"
-
-
-def classify_cmd_length(cmd_line: str) -> str:
-    token_count = len(cmd_line.split())
-    if token_count == 0:
-        return "empty"
-    if token_count <= 2:
-        return "short"
-    if token_count <= 6:
-        return "medium"
-    return "long"
-
-
-def classify_cmd_pipe_flag(cmd_line: str) -> str:
-    text = cmd_line.strip()
-    if not text:
-        return "unknown"
-    return "yes" if any(token in text for token in PIPE_TOKENS) else "no"
-
-
-def classify_file_path_bucket(file_descriptor: str) -> str:
-    text = file_descriptor.strip().lower()
-    if not text:
-        return "unknown"
-    if text.startswith("/proc/") or text == "/proc":
-        return "procfs"
-    if text.startswith("/dev/") or text == "/dev":
-        return "devfs"
-    if text.startswith("/tmp/") or text.startswith("/var/tmp/") or text.startswith("/dev/shm/"):
-        return "temp"
-    if text.startswith("/etc/"):
-        return "config"
-    if text.startswith("/usr/bin/") or text.startswith("/bin/") or text.startswith("/usr/sbin/") or text.startswith("/sbin/"):
-        return "system_bin"
-    if text.startswith("/usr/lib/") or text.startswith("/lib/") or text.startswith("/lib64/") or text.startswith("/usr/lib64/"):
-        return "system_lib"
-    if text.startswith("/var/log/"):
-        return "log"
-    if text.startswith("/home/") or text.startswith("/root/"):
-        return "user_home"
-    return "other"
-
-
-def classify_file_extension_bucket(file_descriptor: str) -> str:
-    text = file_descriptor.strip().lower()
-    if not text:
-        return "unknown"
-    basename = os.path.basename(text)
-    if not basename or "." not in basename:
-        return "none"
-    extension = basename.rsplit(".", 1)[-1]
-    if extension in {"conf", "config", "cfg", "ini", "yaml", "yml", "json", "xml"}:
-        return "config"
-    if extension in {"sh", "bash", "zsh", "py", "pl", "rb", "php", "js"}:
-        return "script"
-    if extension in {"so", "dll", "dylib", "a", "o"}:
-        return "library"
-    if extension in {"log", "txt", "out"}:
-        return "log"
-    if extension in {"db", "sqlite", "sqlite3", "ldb"}:
-        return "database"
-    if extension in {"zip", "tar", "gz", "bz2", "xz", "7z", "rar"}:
-        return "archive"
-    if extension in {"bin", "exe"}:
-        return "binary"
-    return "other"
-
-
-def classify_file_hidden_flag(file_descriptor: str) -> str:
-    text = file_descriptor.strip()
-    if not text:
-        return "unknown"
-    basename = os.path.basename(text.rstrip("/"))
-    return "yes" if basename.startswith(".") else "no"
 
 
 def parse_ip_scope(address: str) -> str:
@@ -258,16 +133,6 @@ def build_feature_builders(group_name: str) -> Dict[str, FeatureBuilder]:
     builders: Dict[str, FeatureBuilder] = {
         column: raw_column_builder(column) for column in RAW_CATEGORICAL_CANDIDATES.get(group_name, [])
     }
-
-    if group_name in PROCESS_GROUPS:
-        builders["cmd_semantic_bucket"] = lambda row: classify_cmd_semantic(row.get("cmd_line", ""))
-        builders["cmd_length_bucket"] = lambda row: classify_cmd_length(row.get("cmd_line", ""))
-        builders["cmd_pipe_flag"] = lambda row: classify_cmd_pipe_flag(row.get("cmd_line", ""))
-
-    if group_name in FILE_GROUPS:
-        builders["file_path_bucket"] = lambda row: classify_file_path_bucket(row.get("file_descriptor", ""))
-        builders["file_extension_bucket"] = lambda row: classify_file_extension_bucket(row.get("file_descriptor", ""))
-        builders["file_hidden_flag"] = lambda row: classify_file_hidden_flag(row.get("file_descriptor", ""))
 
     if group_name in NETWORK_GROUPS:
         builders["remote_scope_bucket"] = lambda row: parse_ip_scope(row.get("remote_address", ""))
@@ -440,7 +305,8 @@ def main() -> None:
         "windows": window_outputs,
         "notes": [
             "Low-cardinality categorical vocabularies are fit on train rows only.",
-            "Derived semantic categorical buckets are built from cmd_line, file_descriptor, and network endpoint metadata.",
+            "Derived semantic categorical buckets are only used for network endpoint metadata in this stage.",
+            "Process/file semantic enrichment is exported upstream as numeric event-level aggregate features.",
             "High-cardinality raw text fields are not encoded directly into model features.",
             "node_uuid and node_type are retained as metadata columns only.",
         ],

@@ -8,7 +8,7 @@ The cleaned feature tables still contain a small number of text columns. GNN inp
 
 - keeps only a minimal set of metadata columns for alignment
 - one-hot encodes low-cardinality categorical columns
-- derives compact semantic buckets from selected raw text fields
+- derives compact network-endpoint semantic buckets from selected raw text fields
 - leaves high-cardinality raw strings out of the model feature matrix
 
 ## Inputs
@@ -37,40 +37,26 @@ Low-cardinality categorical vocabularies are fit on the `train` window only.
 
 - `process_view__file_node`
   - `file_type`
-  - `permission_value`
-  - derived buckets from `file_descriptor`:
-    `file_path_bucket`, `file_extension_bucket`, `file_hidden_flag`
 - `file_view__file_node`
   - `file_type`
-  - `permission_value`
-  - derived buckets from `file_descriptor`:
-    `file_path_bucket`, `file_extension_bucket`, `file_hidden_flag`
 - `process_view__network_node`
   - `local_port_bucket`
   - `remote_port_bucket`
   - `external_remote_ip_flag`
-  - `ip_protocol`
   - derived buckets:
     `remote_scope_bucket`, `remote_service_bucket`
 - `network_view__network_node`
   - `local_port_bucket`
   - `remote_port_bucket`
   - `external_remote_ip_flag`
-  - `ip_protocol`
   - derived buckets:
     `remote_scope_bucket`, `remote_service_bucket`
 - `file_view__process_node`
   - `subject_type` if non-constant on train
-  - derived buckets from `cmd_line`:
-    `cmd_semantic_bucket`, `cmd_length_bucket`, `cmd_pipe_flag`
 - `network_view__process_node`
   - `subject_type` if non-constant on train
-  - derived buckets from `cmd_line`:
-    `cmd_semantic_bucket`, `cmd_length_bucket`, `cmd_pipe_flag`
 - `process_view__process_node`
   - `subject_type` if non-constant on train
-  - derived buckets from `cmd_line`:
-    `cmd_semantic_bucket`, `cmd_length_bucket`, `cmd_pipe_flag`
 
 If a candidate column has only one category on train, it is dropped instead of encoded.
 
@@ -82,16 +68,11 @@ These raw text fields are intentionally excluded from model features in v1:
 - `local_address`
 - `remote_address`
 
-These source fields are kept only long enough to derive semantic buckets, then dropped from
-the final model-ready TSV:
-
-- `cmd_line`
-- `file_descriptor`
-
 Reason:
 
 - they are either high-cardinality or weakly stable across windows
 - they are more useful as semantic source material than as direct one-hot features
+- process/file semantic enrichment is already aggregated upstream as numeric event-level features
 
 ## Numeric Feature Handling
 
@@ -100,6 +81,8 @@ All numeric columns come from the previous cleaning stage:
 - retained-node rows only
 - missing numeric values filled with `0`
 - standardized with train-window mean and standard deviation
+- includes event-level semantic aggregates from `events_raw.exec_name`, `events_raw.object_path`,
+  and `events_raw.object2_path`
 
 This stage does not re-standardize numeric columns.
 
