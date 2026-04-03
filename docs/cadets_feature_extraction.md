@@ -116,6 +116,7 @@ Static columns from local `file_entities` are also kept:
 
 - `host_id`
 - `file_type`
+- `file_descriptor`
 - `permission_value`
 - `size_bytes`
 
@@ -146,6 +147,7 @@ Static columns from local `file_entities` are also kept:
 
 - `host_id`
 - `file_type`
+- `file_descriptor`
 - `permission_value`
 - `size_bytes`
 
@@ -207,6 +209,7 @@ Static columns from local `process_entities` are also kept:
 
 - `host_id`
 - `subject_type`
+- `cmd_line`
 - `has_parent_flag`
 
 ### `network_view__network_node`
@@ -264,7 +267,23 @@ Static columns from local `process_entities` are also kept:
 
 - `host_id`
 - `subject_type`
+- `cmd_line`
 - `has_parent_flag`
+
+## Semantic Source Fields
+
+The extraction stage now also preserves two high-cardinality source fields that are not meant to be
+one-hot encoded directly:
+
+- `cmd_line` for process-node groups
+- `file_descriptor` for file-node groups
+
+These fields are carried forward into the cleaning stage so the encoding stage can derive compact
+semantic buckets from them, such as:
+
+- process command behavior buckets
+- file path / extension buckets
+- hidden-file flags
 
 ## Why Seven Groups For Now
 

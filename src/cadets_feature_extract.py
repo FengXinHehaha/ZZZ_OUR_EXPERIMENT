@@ -162,6 +162,7 @@ SELECT
     'process'::text AS node_type,
     COALESCE(p.host_id, '') AS host_id,
     COALESCE(p.subject_type, '') AS subject_type,
+    COALESCE(p.cmd_line, '') AS cmd_line,
     CASE
         WHEN p.parent_subject_uuid IS NULL OR p.parent_subject_uuid = '' THEN 0
         ELSE 1
@@ -220,6 +221,7 @@ GROUP BY
     b.node_uuid,
     p.host_id,
     p.subject_type,
+    p.cmd_line,
     p.parent_subject_uuid,
     fr.unique_file_count,
     nr.unique_network_count
@@ -247,6 +249,7 @@ SELECT
     'process'::text AS node_type,
     COALESCE(p.host_id, '') AS host_id,
     COALESCE(p.subject_type, '') AS subject_type,
+    COALESCE(p.cmd_line, '') AS cmd_line,
     CASE
         WHEN p.parent_subject_uuid IS NULL OR p.parent_subject_uuid = '' THEN 0
         ELSE 1
@@ -316,6 +319,7 @@ SELECT
     'file'::text AS node_type,
     COALESCE(f.host_id, '') AS host_id,
     COALESCE(f.file_type, '') AS file_type,
+    COALESCE(f.file_descriptor, '') AS file_descriptor,
     COALESCE(f.permission_value, '') AS permission_value,
     COALESCE(f.size_bytes, 0)::bigint AS size_bytes,
     COUNT(*)::bigint AS total_accesses,
@@ -337,7 +341,7 @@ SELECT
 FROM file_hits AS h
 JOIN file_entities AS f
   ON f.uuid = h.node_uuid
-GROUP BY h.node_uuid, f.host_id, f.file_type, f.permission_value, f.size_bytes
+GROUP BY h.node_uuid, f.host_id, f.file_type, f.file_descriptor, f.permission_value, f.size_bytes
 """
 
 
@@ -470,6 +474,7 @@ SELECT
     'file'::text AS node_type,
     COALESCE(f.host_id, '') AS host_id,
     COALESCE(f.file_type, '') AS file_type,
+    COALESCE(f.file_descriptor, '') AS file_descriptor,
     COALESCE(f.permission_value, '') AS permission_value,
     COALESCE(f.size_bytes, 0)::bigint AS size_bytes,
     COUNT(*)::bigint AS total_process_context_events,
@@ -496,7 +501,7 @@ JOIN file_entities AS f
   ON f.uuid = h.node_uuid
 LEFT JOIN process_network_stats AS pns
   ON pns.process_uuid = h.process_uuid
-GROUP BY h.node_uuid, f.host_id, f.file_type, f.permission_value, f.size_bytes
+GROUP BY h.node_uuid, f.host_id, f.file_type, f.file_descriptor, f.permission_value, f.size_bytes
 """
 
 
@@ -628,6 +633,7 @@ SELECT
     'process'::text AS node_type,
     COALESCE(p.host_id, '') AS host_id,
     COALESCE(p.subject_type, '') AS subject_type,
+    COALESCE(p.cmd_line, '') AS cmd_line,
     CASE
         WHEN p.parent_subject_uuid IS NULL OR p.parent_subject_uuid = '' THEN 0
         ELSE 1
@@ -652,7 +658,7 @@ SELECT
 FROM file_hits AS h
 JOIN process_entities AS p
   ON p.uuid = h.node_uuid
-GROUP BY h.node_uuid, p.host_id, p.subject_type, p.parent_subject_uuid
+GROUP BY h.node_uuid, p.host_id, p.subject_type, p.cmd_line, p.parent_subject_uuid
 """
 
 
@@ -705,6 +711,7 @@ SELECT
     'process'::text AS node_type,
     COALESCE(p.host_id, '') AS host_id,
     COALESCE(p.subject_type, '') AS subject_type,
+    COALESCE(p.cmd_line, '') AS cmd_line,
     CASE
         WHEN p.parent_subject_uuid IS NULL OR p.parent_subject_uuid = '' THEN 0
         ELSE 1
@@ -732,7 +739,7 @@ SELECT
 FROM network_hit_enriched AS h
 JOIN process_entities AS p
   ON p.uuid = h.node_uuid
-GROUP BY h.node_uuid, p.host_id, p.subject_type, p.parent_subject_uuid
+GROUP BY h.node_uuid, p.host_id, p.subject_type, p.cmd_line, p.parent_subject_uuid
 """
 
 
