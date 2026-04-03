@@ -5,6 +5,8 @@ import math
 from pathlib import Path
 from typing import Dict, Iterable, List, Set, Tuple
 
+from tqdm import tqdm
+
 
 DEFAULT_FEATURE_MANIFEST = Path(__file__).resolve().parents[1] / "artifacts" / "features" / "feature_manifest.json"
 DEFAULT_NODE_RETENTION_MANIFEST = Path(__file__).resolve().parents[1] / "artifacts" / "node_retention" / "retention_manifest.json"
@@ -66,7 +68,15 @@ def read_uuid_set(path: Path) -> Set[str]:
     values: Set[str] = set()
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        for row in reader:
+        progress = tqdm(
+            reader,
+            desc=f"keep-set {path.parent.name}/{path.name}",
+            unit="row",
+            dynamic_ncols=True,
+            mininterval=2.0,
+            leave=False,
+        )
+        for row in progress:
             values.add(row["node_uuid"])
     return values
 
@@ -121,7 +131,15 @@ def build_group_spec(train_path: Path, keep_set: Set[str]) -> Dict[str, object]:
         numeric_stats = init_numeric_stats(numeric_columns)
         retained_rows = 0
 
-        for row in reader:
+        progress = tqdm(
+            reader,
+            desc=f"clean-spec {train_path.parent.name}/{train_path.name}",
+            unit="row",
+            dynamic_ncols=True,
+            mininterval=2.0,
+            leave=False,
+        )
+        for row in progress:
             if row["node_uuid"] not in keep_set:
                 continue
             retained_rows += 1
@@ -211,7 +229,15 @@ def write_cleaned_file(
         writer = csv.DictWriter(dst, fieldnames=fieldnames, delimiter="\t")
         writer.writeheader()
 
-        for row in reader:
+        progress = tqdm(
+            reader,
+            desc=f"clean-write {input_path.parent.name}/{input_path.name}",
+            unit="row",
+            dynamic_ncols=True,
+            mininterval=2.0,
+            leave=False,
+        )
+        for row in progress:
             input_rows += 1
             if row["node_uuid"] not in keep_set:
                 continue

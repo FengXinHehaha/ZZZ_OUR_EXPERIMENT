@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Callable, Dict, List
 
+from tqdm import tqdm
+
 
 DEFAULT_FEATURE_MANIFEST = Path(__file__).resolve().parents[1] / "artifacts" / "features_cleaned" / "feature_manifest.json"
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "artifacts" / "features_model_ready"
@@ -278,7 +280,15 @@ def fit_group_vocab(train_path: Path, feature_builders: Dict[str, FeatureBuilder
     vocab: Dict[str, Dict[str, int]] = {column: {} for column in feature_builders}
     with train_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        for row in reader:
+        progress = tqdm(
+            reader,
+            desc=f"encode-vocab {train_path.parent.name}/{train_path.name}",
+            unit="row",
+            dynamic_ncols=True,
+            mininterval=2.0,
+            leave=False,
+        )
+        for row in progress:
             for column, builder in feature_builders.items():
                 value = normalize_category(builder(row))
                 vocab[column][value] = vocab[column].get(value, 0) + 1
@@ -329,7 +339,15 @@ def encode_window_group(
         writer = csv.DictWriter(dst, fieldnames=fieldnames, delimiter="\t")
         writer.writeheader()
 
-        for row in reader:
+        progress = tqdm(
+            reader,
+            desc=f"encode-write {input_path.parent.name}/{input_path.name}",
+            unit="row",
+            dynamic_ncols=True,
+            mininterval=2.0,
+            leave=False,
+        )
+        for row in progress:
             rows += 1
             encoded_row = {column: row[column] for column in metadata_columns}
             for column in numeric_columns:
