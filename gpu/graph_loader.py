@@ -257,3 +257,35 @@ def build_relation_group_adjacencies(
         adjacencies.append(adjacency)
 
     return group_names, adjacencies
+
+
+def build_event_type_adjacencies(
+    edge_index: torch.Tensor,
+    edge_type: torch.Tensor,
+    num_nodes: int,
+    event_type_vocab: Dict[str, int],
+    edge_weight: torch.Tensor | None = None,
+    device: torch.device | str | None = None,
+) -> tuple[List[str], List[torch.Tensor]]:
+    if device is None:
+        device = edge_index.device
+    device = torch.device(device)
+
+    relation_names = [name for name, _idx in sorted(event_type_vocab.items(), key=lambda item: item[1])]
+    edge_type = edge_type.to(device=device, dtype=torch.long)
+
+    adjacencies: List[torch.Tensor] = []
+    for relation_id, _relation_name in enumerate(relation_names):
+        mask = edge_type == relation_id
+        relation_edge_index = edge_index[:, mask]
+        relation_edge_weight = None if edge_weight is None else edge_weight[mask]
+        adjacency = build_normalized_adjacency(
+            edge_index=relation_edge_index,
+            num_nodes=num_nodes,
+            edge_weight=relation_edge_weight,
+            add_self_loops=False,
+            device=device,
+        )
+        adjacencies.append(adjacency)
+
+    return relation_names, adjacencies

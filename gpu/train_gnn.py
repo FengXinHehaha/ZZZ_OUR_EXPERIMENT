@@ -12,6 +12,7 @@ import torch.nn.functional as F
 
 from graph_loader import (
     build_all_view_matrices,
+    build_event_type_adjacencies,
     build_normalized_adjacency,
     build_relation_group_adjacencies,
     load_graph,
@@ -43,7 +44,7 @@ VIEW_INPUT_DIMS = {
 }
 
 DECODER_TYPES = ("dot", "mlp", "rel_mlp")
-MESSAGE_PASSING_TYPES = ("vanilla", "rel_grouped")
+MESSAGE_PASSING_TYPES = ("vanilla", "rel_grouped", "rgcn")
 
 SELECTION_METRICS = {
     "val_edge_loss": ("val", "edge_loss", "min"),
@@ -313,6 +314,10 @@ class RelationGroupedViewEncoder(nn.Module):
         return z
 
 
+class RGCNViewEncoder(RelationGroupedViewEncoder):
+    pass
+
+
 class MultiViewFullBatchGAE(nn.Module):
     def __init__(
         self,
@@ -333,16 +338,15 @@ class MultiViewFullBatchGAE(nn.Module):
             self.process_encoder = encoder_cls(VIEW_INPUT_DIMS["process_view"], hidden_dim, latent_dim, dropout)
             self.file_encoder = encoder_cls(VIEW_INPUT_DIMS["file_view"], hidden_dim, latent_dim, dropout)
             self.network_encoder = encoder_cls(VIEW_INPUT_DIMS["network_view"], hidden_dim, latent_dim, dropout)
-        elif message_passing_type == "rel_grouped":
+        elif message_passing_type in {"rel_grouped", "rgcn"}:
             if num_relation_groups <= 0:
-                raise ValueError("num_relation_groups must be positive when message_passing_type=rel_grouped")
-            self.process_encoder = RelationGroupedViewEncoder(
-                VIEW_INPUT_DIMS["process_view"], hidden_dim, latent_dim, dropout, num_relation_groups
-            )
-            self.file_encoder = RelationGroupedViewEncoder(
-                VIEW_INPUT_DIMS["file_view"], hidden_dim, latent_dim, dropout, num_relation_groups
-            )
-            self.network_encoder = RelationGroupedViewEncoder(
+                raise ValueError(
+                    "num_relation_groups must be positive when message_passing_type is relation-aware"
+                )
+            encoder_cls = RelationGroupedViewEncoder if message_passing_type == "rel_grouped" else RGCNViewEncoder
+            self.process_encoder = encoder_cls(VIEW_INPUT_DIMS["process_view"], hidden_dim, latent_dim, dropout, num_relation_groups)
+            self.file_encoder = encoder_cls(VIEW_INPUT_DIMS["file_view"], hidden_dim, latent_dim, dropout, num_relation_groups)
+            self.network_encoder = encoder_cls(
                 VIEW_INPUT_DIMS["network_view"], hidden_dim, latent_dim, dropout, num_relation_groups
             )
         else:
@@ -483,6 +487,15 @@ def prepare_graph_payload(
             event_type_vocab=graph["event_type_vocab"],
             edge_weight=edge_weight,
             scheme=relation_group_scheme,
+            device=device,
+        )
+    elif message_passing_type == "rgcn":
+        relation_group_names, relation_adjacencies = build_event_type_adjacencies(
+            edge_index=edge_index,
+            edge_type=edge_type,
+            num_nodes=int(graph["num_nodes"]),
+            event_type_vocab=graph["event_type_vocab"],
+            edge_weight=edge_weight,
             device=device,
         )
 

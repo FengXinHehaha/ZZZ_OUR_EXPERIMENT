@@ -9,7 +9,8 @@ Current entrypoints:
 - `train_gnn.py` trains a first full-batch multi-view GNN baseline on the built graph artifacts
   and saves the best checkpoint by a selectable metric (default: `val_edge_loss`); decoder options
   now include `dot`, `mlp`, and relation-aware `rel_mlp`, while message-passing options include
-  vanilla shared-adjacency GCN and lightweight relation-grouped propagation via `rel_grouped`
+  vanilla shared-adjacency GCN, lightweight relation-grouped propagation via `rel_grouped`,
+  and per-event-type relational propagation via `rgcn`
 - `evaluate_checkpoint.py` exports node-level anomaly scores and top-k summaries from a saved checkpoint
   and now defaults to `top5_mean + robust_zscore_by_type`
 - `summarize_evaluation.py` prints a compact top-k hit summary from an evaluation output directory
@@ -39,3 +40,4 @@ Lightweight relation-aware message passing:
   `file_read / file_write / file_meta / process / network / flow_other`
 - `coarse_v2` is a finer grouped variant:
   `file_read / file_write / file_meta / process_lifecycle / process_control / network_connect / network_io / flow_other`
+- `train_gnn.py --message-passing-type rgcn` uses one adjacency per raw `edge_type`
