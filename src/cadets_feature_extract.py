@@ -834,9 +834,10 @@ def create_process_temp_tables(conn) -> None:
     conn.commit()
 
 
-def accumulate_process_window_day(conn, start_ns: int, end_ns: int) -> None:
-    with conn.cursor() as cursor:
-        cursor.execute(
+def populate_process_temp_tables(conn, start_ns: int, end_ns: int, label: str) -> None:
+    steps = [
+        (
+            "stats",
             f"""
             INSERT INTO tmp_process_stats (
                 node_uuid,
@@ -889,33 +890,11 @@ def accumulate_process_window_day(conn, start_ns: int, end_ns: int) -> None:
             WHERE e.timestamp_ns >= %s
               AND e.timestamp_ns < %s
             GROUP BY e.subject_uuid
-            ON CONFLICT (node_uuid) DO UPDATE
-            SET
-                total_events = tmp_process_stats.total_events + EXCLUDED.total_events,
-                read_count = tmp_process_stats.read_count + EXCLUDED.read_count,
-                write_count = tmp_process_stats.write_count + EXCLUDED.write_count,
-                open_count = tmp_process_stats.open_count + EXCLUDED.open_count,
-                execute_count = tmp_process_stats.execute_count + EXCLUDED.execute_count,
-                connect_count = tmp_process_stats.connect_count + EXCLUDED.connect_count,
-                send_count = tmp_process_stats.send_count + EXCLUDED.send_count,
-                recv_count = tmp_process_stats.recv_count + EXCLUDED.recv_count,
-                accept_count = tmp_process_stats.accept_count + EXCLUDED.accept_count,
-                create_object_count = tmp_process_stats.create_object_count + EXCLUDED.create_object_count,
-                fork_count = tmp_process_stats.fork_count + EXCLUDED.fork_count,
-                mmap_count = tmp_process_stats.mmap_count + EXCLUDED.mmap_count,
-                modify_process_count = tmp_process_stats.modify_process_count + EXCLUDED.modify_process_count,
-                close_count = tmp_process_stats.close_count + EXCLUDED.close_count,
-                shell_exec_count = tmp_process_stats.shell_exec_count + EXCLUDED.shell_exec_count,
-                interpreter_exec_count = tmp_process_stats.interpreter_exec_count + EXCLUDED.interpreter_exec_count,
-                network_tool_exec_count = tmp_process_stats.network_tool_exec_count + EXCLUDED.network_tool_exec_count,
-                package_tool_exec_count = tmp_process_stats.package_tool_exec_count + EXCLUDED.package_tool_exec_count,
-                system_tool_exec_count = tmp_process_stats.system_tool_exec_count + EXCLUDED.system_tool_exec_count,
-                missing_exec_name_count = tmp_process_stats.missing_exec_name_count + EXCLUDED.missing_exec_name_count
+            ON CONFLICT (node_uuid) DO NOTHING
             """,
-            (start_ns, end_ns),
-        )
-
-        cursor.execute(
+        ),
+        (
+            "event types",
             """
             INSERT INTO tmp_process_event_types (node_uuid, event_type)
             SELECT DISTINCT e.subject_uuid, e.event_type
@@ -926,10 +905,9 @@ def accumulate_process_window_day(conn, start_ns: int, end_ns: int) -> None:
               AND e.timestamp_ns < %s
             ON CONFLICT DO NOTHING
             """,
-            (start_ns, end_ns),
-        )
-
-        cursor.execute(
+        ),
+        (
+            "file refs(object)",
             """
             INSERT INTO tmp_process_file_refs (node_uuid, file_uuid)
             SELECT DISTINCT e.subject_uuid, e.object_uuid
@@ -942,10 +920,9 @@ def accumulate_process_window_day(conn, start_ns: int, end_ns: int) -> None:
               AND e.timestamp_ns < %s
             ON CONFLICT DO NOTHING
             """,
-            (start_ns, end_ns),
-        )
-
-        cursor.execute(
+        ),
+        (
+            "file refs(object2)",
             """
             INSERT INTO tmp_process_file_refs (node_uuid, file_uuid)
             SELECT DISTINCT e.subject_uuid, e.object2_uuid
@@ -958,10 +935,9 @@ def accumulate_process_window_day(conn, start_ns: int, end_ns: int) -> None:
               AND e.timestamp_ns < %s
             ON CONFLICT DO NOTHING
             """,
-            (start_ns, end_ns),
-        )
-
-        cursor.execute(
+        ),
+        (
+            "network refs(object)",
             """
             INSERT INTO tmp_process_network_refs (node_uuid, network_uuid)
             SELECT DISTINCT e.subject_uuid, e.object_uuid
@@ -974,10 +950,9 @@ def accumulate_process_window_day(conn, start_ns: int, end_ns: int) -> None:
               AND e.timestamp_ns < %s
             ON CONFLICT DO NOTHING
             """,
-            (start_ns, end_ns),
-        )
-
-        cursor.execute(
+        ),
+        (
+            "network refs(object2)",
             """
             INSERT INTO tmp_process_network_refs (node_uuid, network_uuid)
             SELECT DISTINCT e.subject_uuid, e.object2_uuid
@@ -990,10 +965,9 @@ def accumulate_process_window_day(conn, start_ns: int, end_ns: int) -> None:
               AND e.timestamp_ns < %s
             ON CONFLICT DO NOTHING
             """,
-            (start_ns, end_ns),
-        )
-
-        cursor.execute(
+        ),
+        (
+            "exec names",
             """
             INSERT INTO tmp_process_exec_names (node_uuid, exec_name)
             SELECT DISTINCT
@@ -1007,19 +981,23 @@ def accumulate_process_window_day(conn, start_ns: int, end_ns: int) -> None:
               AND NULLIF(BTRIM(COALESCE(e.exec_name, '')), '') IS NOT NULL
             ON CONFLICT DO NOTHING
             """,
-            (start_ns, end_ns),
-        )
-    conn.commit()
+        ),
+    ]
+
+    with tqdm(total=len(steps), desc=f"{label} phases", unit="step", dynamic_ncols=True, leave=False) as phase_bar:
+        with conn.cursor() as cursor:
+            for step_name, sql in steps:
+                phase_bar.set_postfix_str(step_name)
+                cursor.execute(sql, (start_ns, end_ns))
+                phase_bar.update(1)
+        conn.commit()
 
 
 def export_process_view_incremental(conn, days: List[str], output_path: Path, label: str) -> int:
     create_process_temp_tables(conn)
-    with tqdm(total=len(days), desc=f"{label} days", unit="day", dynamic_ncols=True, leave=False) as day_bar:
-        for day in days:
-            start_ns, end_ns = utc_day_bounds(day)
-            log(f"[feature-extract] {label}: accumulate day {day}")
-            accumulate_process_window_day(conn, start_ns, end_ns)
-            day_bar.update(1)
+    start_ns, end_ns = window_bounds(days)
+    log(f"[feature-extract] {label}: aggregate full window in one pass")
+    populate_process_temp_tables(conn, start_ns, end_ns, label)
     return copy_query_to_tsv(conn, PROCESS_VIEW_EXPORT_FROM_TEMP_QUERY, tuple(), output_path, label)
 
 
