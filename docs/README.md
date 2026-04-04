@@ -15,3 +15,4 @@ Implemented notes:
 - `cadets_edge_aggregation.md` defines the first window-level typed-edge compression stage
 - `cadets_edge_filter.md` defines how to further filter typed edges without revisiting raw events
 - `gpu_baseline_summary.md` records the current GPU baseline conclusions, ablations, and recommended next directions
+- `file_node_analysis_summary.md` records the current file-node error analysis, support-aware scorer, and adaptive threshold policy
