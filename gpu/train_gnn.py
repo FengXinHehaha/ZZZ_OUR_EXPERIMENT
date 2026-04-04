@@ -47,6 +47,7 @@ VIEW_INPUT_DIMS = {
 DECODER_TYPES = ("dot", "mlp", "rel_mlp")
 MESSAGE_PASSING_TYPES = ("vanilla", "rel_grouped", "rgcn")
 LOSS_TYPES = ("bce", "focal")
+NEGATIVE_MINING_TYPES = ("none", "top_fraction")
 
 SELECTION_METRICS = {
     "val_edge_loss": ("val", "edge_loss", "min"),
@@ -149,6 +150,19 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="How many sampled negatives to draw per positive edge. Default: 1.0.",
+    )
+    parser.add_argument(
+        "--negative-mining",
+        type=str,
+        default="none",
+        choices=sorted(NEGATIVE_MINING_TYPES),
+        help="How to select negatives from the sampled pool. Default: none.",
+    )
+    parser.add_argument(
+        "--hard-negative-top-fraction",
+        type=float,
+        default=0.25,
+        help="When --negative-mining=top_fraction, keep this hardest fraction of sampled negatives. Default: 0.25.",
     )
     parser.add_argument(
         "--train-pos-edge-cap",
@@ -268,6 +282,32 @@ def edge_loss_term(
     pt = torch.where(targets > 0.5, probabilities, 1.0 - probabilities)
     focal_weight = torch.pow((1.0 - pt).clamp_min(1e-8), focal_gamma)
     return (focal_weight * bce).mean()
+
+
+def mine_negative_subset(
+    negative_edges: torch.Tensor,
+    negative_edge_type: torch.Tensor,
+    neg_logits: torch.Tensor,
+    negative_mining: str,
+    hard_negative_top_fraction: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if negative_mining == "none" or neg_logits.numel() == 0:
+        return negative_edges, negative_edge_type, neg_logits
+
+    if negative_mining != "top_fraction":
+        raise ValueError(f"Unsupported negative mining strategy: {negative_mining}")
+
+    keep_fraction = min(max(hard_negative_top_fraction, 0.0), 1.0)
+    keep_count = max(1, int(math.ceil(neg_logits.shape[0] * keep_fraction)))
+    if keep_count >= neg_logits.shape[0]:
+        return negative_edges, negative_edge_type, neg_logits
+
+    hardest_indices = torch.topk(neg_logits.detach(), k=keep_count, largest=True).indices
+    return (
+        negative_edges[:, hardest_indices],
+        negative_edge_type[hardest_indices],
+        neg_logits[hardest_indices],
+    )
 
 
 def compute_node_scores(num_nodes: int, edge_index: torch.Tensor, edge_error: torch.Tensor) -> torch.Tensor:
@@ -625,6 +665,8 @@ def evaluate_graph(
     pos_loss_weight: float,
     neg_loss_weight: float,
     negative_samples_per_positive: float,
+    negative_mining: str,
+    hard_negative_top_fraction: float,
 ) -> Dict[str, object]:
     validate_matching_view_input_dims(model.view_input_dims, graph_payload["view_input_dims"], graph_payload["name"])
     model.eval()
@@ -659,6 +701,13 @@ def evaluate_graph(
 
         pos_logits = model.decode_edges(z_fused, positive_edges, positive_edge_type)
         neg_logits = model.decode_edges(z_fused, negative_edges, negative_edge_type)
+        negative_edges, negative_edge_type, neg_logits = mine_negative_subset(
+            negative_edges,
+            negative_edge_type,
+            neg_logits,
+            negative_mining,
+            hard_negative_top_fraction,
+        )
 
         pos_loss = edge_loss_term(pos_logits, torch.ones_like(pos_logits), loss_type, focal_gamma)
         neg_loss = edge_loss_term(neg_logits, torch.zeros_like(neg_logits), loss_type, focal_gamma)
@@ -700,6 +749,8 @@ def train_epoch(
     pos_loss_weight: float,
     neg_loss_weight: float,
     negative_samples_per_positive: float,
+    negative_mining: str,
+    hard_negative_top_fraction: float,
 ) -> Dict[str, float]:
     validate_matching_view_input_dims(model.view_input_dims, train_payload["view_input_dims"], train_payload["name"])
     model.train()
@@ -735,6 +786,13 @@ def train_epoch(
 
     pos_logits = model.decode_edges(z_fused, positive_edges, positive_edge_type)
     neg_logits = model.decode_edges(z_fused, negative_edges, negative_edge_type)
+    negative_edges, negative_edge_type, neg_logits = mine_negative_subset(
+        negative_edges,
+        negative_edge_type,
+        neg_logits,
+        negative_mining,
+        hard_negative_top_fraction,
+    )
 
     pos_loss = edge_loss_term(pos_logits, torch.ones_like(pos_logits), loss_type, focal_gamma)
     neg_loss = edge_loss_term(neg_logits, torch.zeros_like(neg_logits), loss_type, focal_gamma)
@@ -754,6 +812,7 @@ def train_epoch(
         "mean_gate_alpha_network": float(gate_alpha[2]),
         "num_train_edges": int(positive_edges.shape[1]),
         "num_negative_edges": int(num_negative_edges),
+        "num_negative_edges_used": int(neg_logits.shape[0]),
     }
 
 
@@ -846,6 +905,8 @@ def main() -> None:
         "pos_loss_weight": args.pos_loss_weight,
         "neg_loss_weight": args.neg_loss_weight,
         "negative_samples_per_positive": args.negative_samples_per_positive,
+        "negative_mining": args.negative_mining,
+        "hard_negative_top_fraction": args.hard_negative_top_fraction,
         "train_pos_edge_cap": args.train_pos_edge_cap,
         "eval_pos_edge_cap": args.eval_pos_edge_cap,
         "run_name": run_name,
@@ -866,6 +927,8 @@ def main() -> None:
             pos_loss_weight=args.pos_loss_weight,
             neg_loss_weight=args.neg_loss_weight,
             negative_samples_per_positive=args.negative_samples_per_positive,
+            negative_mining=args.negative_mining,
+            hard_negative_top_fraction=args.hard_negative_top_fraction,
         )
         eval_metrics = [
             evaluate_graph(
@@ -877,6 +940,8 @@ def main() -> None:
                 pos_loss_weight=args.pos_loss_weight,
                 neg_loss_weight=args.neg_loss_weight,
                 negative_samples_per_positive=args.negative_samples_per_positive,
+                negative_mining=args.negative_mining,
+                hard_negative_top_fraction=args.hard_negative_top_fraction,
             )
             for payload in eval_payloads
         ]
@@ -896,6 +961,7 @@ def main() -> None:
             f"pos_loss={train_metrics['pos_loss']:.6f} "
             f"neg_loss={train_metrics['neg_loss']:.6f} "
             f"neg_edges={train_metrics['num_negative_edges']} "
+            f"neg_used={train_metrics['num_negative_edges_used']} "
             f"seconds={elapsed:.2f}",
             flush=True,
         )
