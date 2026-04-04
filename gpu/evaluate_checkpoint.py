@@ -181,6 +181,9 @@ def evaluate_single_graph(
         neg_loss = torch.nn.functional.binary_cross_entropy_with_logits(neg_logits, torch.zeros_like(neg_logits))
         edge_loss = float((pos_loss + neg_loss).item())
 
+    nodes_rows = read_nodes_table(graph_path.parent / "nodes.tsv")
+    node_types = [row["node_type"] for row in nodes_rows]
+    with torch.no_grad():
         edge_error = 1.0 - torch.sigmoid(
             model.decode_edges(z_fused, payload["edge_index"], payload["edge_type"])
         )
@@ -189,12 +192,11 @@ def evaluate_single_graph(
             payload["edge_index"].detach().cpu(),
             edge_error.detach().cpu().to(dtype=torch.float32),
             score_method,
+            node_types=node_types,
         )
 
         gate_means = encoded["gate_alpha"].mean(dim=0).detach().cpu().tolist()
 
-    nodes_rows = read_nodes_table(graph_path.parent / "nodes.tsv")
-    node_types = [row["node_type"] for row in nodes_rows]
     node_scores = calibrate_scores_by_method(base_scores, node_types, score_calibration)
     node_metrics = compute_binary_metrics(payload["y"].detach().cpu().to(dtype=torch.float32), node_scores)
     scored_rows: List[Dict[str, object]] = []

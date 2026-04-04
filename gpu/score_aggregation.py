@@ -1,9 +1,19 @@
-from typing import Dict
+from typing import Dict, List
 
 import torch
 
 
-SCORE_METHODS = ("mean", "max", "top5_mean", "top10_mean", "q90")
+SCORE_METHODS = (
+    "mean",
+    "max",
+    "top5_mean",
+    "top10_mean",
+    "q90",
+    "top5_mean_log_degree_all",
+    "top5_mean_log_degree_file",
+    "top5_mean_sqrt_degree_file",
+    "top10_mean_log_degree_file",
+)
 
 
 def compute_node_scores_mean(num_nodes: int, edge_index: torch.Tensor, edge_error: torch.Tensor) -> torch.Tensor:
@@ -73,13 +83,77 @@ def compute_segment_scores(
     return scores
 
 
-def compute_all_score_methods(num_nodes: int, edge_index: torch.Tensor, edge_error: torch.Tensor) -> Dict[str, torch.Tensor]:
+def degree_penalty_from_counts(counts: torch.Tensor, mode: str) -> torch.Tensor:
+    counts_float = counts.to(dtype=torch.float32)
+    if mode == "log":
+        return torch.log1p(counts_float).clamp_min(1.0)
+    if mode == "sqrt":
+        return torch.sqrt(counts_float).clamp_min(1.0)
+    raise ValueError(f"Unsupported degree penalty mode: {mode}")
+
+
+def apply_degree_penalty(
+    scores: torch.Tensor,
+    counts: torch.Tensor,
+    node_types: List[str] | None,
+    degree_mode: str,
+    target_node_type: str | None,
+) -> torch.Tensor:
+    penalized = scores.clone()
+    penalty = degree_penalty_from_counts(counts, degree_mode)
+    mask = counts > 0
+    if target_node_type is not None:
+        if node_types is None:
+            raise ValueError(f"node_types are required for target_node_type={target_node_type}")
+        type_mask = torch.tensor(
+            [node_type == target_node_type for node_type in node_types],
+            dtype=torch.bool,
+        )
+        mask = mask & type_mask
+    penalized[mask] = penalized[mask] / penalty[mask]
+    return penalized
+
+
+def compute_all_score_methods(
+    num_nodes: int,
+    edge_index: torch.Tensor,
+    edge_error: torch.Tensor,
+    node_types: List[str] | None = None,
+) -> Dict[str, torch.Tensor]:
     mean_scores = compute_node_scores_mean(num_nodes, edge_index, edge_error)
     max_scores = compute_node_scores_max(num_nodes, edge_index, edge_error)
     incident_values, starts, counts = build_incident_segments(edge_index, edge_error, num_nodes)
     top5_scores = compute_segment_scores(num_nodes, incident_values, starts, counts, mode="topk_mean", param=5)
     top10_scores = compute_segment_scores(num_nodes, incident_values, starts, counts, mode="topk_mean", param=10)
     q90_scores = compute_segment_scores(num_nodes, incident_values, starts, counts, mode="quantile", param=0.90)
+    top5_log_degree_all_scores = apply_degree_penalty(
+        top5_scores,
+        counts,
+        node_types,
+        degree_mode="log",
+        target_node_type=None,
+    )
+    top5_log_degree_file_scores = apply_degree_penalty(
+        top5_scores,
+        counts,
+        node_types,
+        degree_mode="log",
+        target_node_type="file",
+    )
+    top5_sqrt_degree_file_scores = apply_degree_penalty(
+        top5_scores,
+        counts,
+        node_types,
+        degree_mode="sqrt",
+        target_node_type="file",
+    )
+    top10_log_degree_file_scores = apply_degree_penalty(
+        top10_scores,
+        counts,
+        node_types,
+        degree_mode="log",
+        target_node_type="file",
+    )
 
     return {
         "mean": mean_scores,
@@ -87,6 +161,10 @@ def compute_all_score_methods(num_nodes: int, edge_index: torch.Tensor, edge_err
         "top5_mean": top5_scores,
         "top10_mean": top10_scores,
         "q90": q90_scores,
+        "top5_mean_log_degree_all": top5_log_degree_all_scores,
+        "top5_mean_log_degree_file": top5_log_degree_file_scores,
+        "top5_mean_sqrt_degree_file": top5_sqrt_degree_file_scores,
+        "top10_mean_log_degree_file": top10_log_degree_file_scores,
     }
 
 
@@ -95,8 +173,9 @@ def compute_node_scores_by_method(
     edge_index: torch.Tensor,
     edge_error: torch.Tensor,
     method: str,
+    node_types: List[str] | None = None,
 ) -> torch.Tensor:
-    score_methods = compute_all_score_methods(num_nodes, edge_index, edge_error)
+    score_methods = compute_all_score_methods(num_nodes, edge_index, edge_error, node_types=node_types)
     if method not in score_methods:
         raise ValueError(f"Unsupported score method: {method}")
     return score_methods[method]

@@ -243,6 +243,7 @@ def evaluate_single_graph(
         payload["edge_index"].detach().cpu(),
         edge_error.detach().cpu().to(dtype=torch.float32),
         base_score_method,
+        node_types=node_types,
     )
     y_cpu = payload["y"].detach().cpu().to(dtype=torch.float32)
 

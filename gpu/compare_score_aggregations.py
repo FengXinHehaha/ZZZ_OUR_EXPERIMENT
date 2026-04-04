@@ -251,11 +251,17 @@ def evaluate_single_graph(
             model.decode_edges(z_fused, payload["edge_index"], payload["edge_type"])
         )
 
+    nodes_rows = read_nodes_table(graph_path.parent / "nodes.tsv")
+    node_types = [row["node_type"] for row in nodes_rows]
     edge_index_cpu = payload["edge_index"].detach().cpu()
     edge_error_cpu = edge_error.detach().cpu().to(dtype=torch.float32)
     y_cpu = payload["y"].detach().cpu().to(dtype=torch.float32)
-    nodes_rows = read_nodes_table(graph_path.parent / "nodes.tsv")
-    score_methods = compute_all_score_methods(payload["num_nodes"], edge_index_cpu, edge_error_cpu)
+    score_methods = compute_all_score_methods(
+        payload["num_nodes"],
+        edge_index_cpu,
+        edge_error_cpu,
+        node_types=node_types,
+    )
 
     method_summaries: Dict[str, object] = {}
     for method_name, node_scores in score_methods.items():
