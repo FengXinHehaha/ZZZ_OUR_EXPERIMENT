@@ -1,3 +1,4 @@
+import math
 from typing import Dict, List
 
 import torch
@@ -13,6 +14,9 @@ SCORE_METHODS = (
     "top5_mean_log_degree_file",
     "top5_mean_sqrt_degree_file",
     "top10_mean_log_degree_file",
+    "top5_mean_log_support_floor32_file",
+    "top5_mean_log_support_floor128_file",
+    "top10_mean_log_support_floor32_file",
 )
 
 
@@ -114,6 +118,33 @@ def apply_degree_penalty(
     return penalized
 
 
+def apply_support_floor(
+    scores: torch.Tensor,
+    counts: torch.Tensor,
+    node_types: List[str] | None,
+    target_node_type: str,
+    full_support_degree: int,
+    min_scale: float = 0.25,
+) -> torch.Tensor:
+    if full_support_degree <= 1:
+        raise ValueError("full_support_degree must be > 1")
+    if node_types is None:
+        raise ValueError(f"node_types are required for target_node_type={target_node_type}")
+
+    supported = scores.clone()
+    count_values = counts.to(dtype=torch.float32)
+    log_counts = torch.log1p(count_values)
+    full_support_log = math.log1p(float(full_support_degree))
+    scales = (log_counts / full_support_log).clamp(min=min_scale, max=1.0)
+    type_mask = torch.tensor(
+        [node_type == target_node_type for node_type in node_types],
+        dtype=torch.bool,
+    )
+    mask = (count_values > 0) & type_mask
+    supported[mask] = supported[mask] * scales[mask]
+    return supported
+
+
 def compute_all_score_methods(
     num_nodes: int,
     edge_index: torch.Tensor,
@@ -154,6 +185,30 @@ def compute_all_score_methods(
         degree_mode="log",
         target_node_type="file",
     )
+    top5_log_support_floor32_file_scores = apply_support_floor(
+        top5_scores,
+        counts,
+        node_types,
+        target_node_type="file",
+        full_support_degree=32,
+        min_scale=0.25,
+    )
+    top5_log_support_floor128_file_scores = apply_support_floor(
+        top5_scores,
+        counts,
+        node_types,
+        target_node_type="file",
+        full_support_degree=128,
+        min_scale=0.25,
+    )
+    top10_log_support_floor32_file_scores = apply_support_floor(
+        top10_scores,
+        counts,
+        node_types,
+        target_node_type="file",
+        full_support_degree=32,
+        min_scale=0.25,
+    )
 
     return {
         "mean": mean_scores,
@@ -165,6 +220,9 @@ def compute_all_score_methods(
         "top5_mean_log_degree_file": top5_log_degree_file_scores,
         "top5_mean_sqrt_degree_file": top5_sqrt_degree_file_scores,
         "top10_mean_log_degree_file": top10_log_degree_file_scores,
+        "top5_mean_log_support_floor32_file": top5_log_support_floor32_file_scores,
+        "top5_mean_log_support_floor128_file": top5_log_support_floor128_file_scores,
+        "top10_mean_log_support_floor32_file": top10_log_support_floor32_file_scores,
     }
 
 
