@@ -17,7 +17,39 @@ SCORE_METHODS = (
     "top5_mean_log_support_floor32_file",
     "top5_mean_log_support_floor128_file",
     "top10_mean_log_support_floor32_file",
+    "top5_mean_log_support_floor128_file_history_file_only",
+    "top5_mean_log_support_floor128_file_history_file_process",
+    "top5_mean_log_support_floor128_file_history_all_types",
 )
+
+HISTORY_SOURCE_METHOD = "top5_mean_log_support_floor128_file"
+
+HISTORY_METHOD_CONFIGS: Dict[str, Dict[str, object]] = {
+    "top5_mean_log_support_floor128_file_history_file_only": {
+        "base_method": HISTORY_SOURCE_METHOD,
+        "type_weights": {
+            "file": 1.0,
+            "process": 0.0,
+            "network": 0.0,
+        },
+    },
+    "top5_mean_log_support_floor128_file_history_file_process": {
+        "base_method": HISTORY_SOURCE_METHOD,
+        "type_weights": {
+            "file": 1.0,
+            "process": 0.35,
+            "network": 0.0,
+        },
+    },
+    "top5_mean_log_support_floor128_file_history_all_types": {
+        "base_method": HISTORY_SOURCE_METHOD,
+        "type_weights": {
+            "file": 1.0,
+            "process": 0.35,
+            "network": 0.20,
+        },
+    },
+}
 
 
 def compute_node_scores_mean(num_nodes: int, edge_index: torch.Tensor, edge_error: torch.Tensor) -> torch.Tensor:
@@ -145,11 +177,69 @@ def apply_support_floor(
     return supported
 
 
+def compute_percentile_scores_by_type(scores: torch.Tensor, node_types: List[str]) -> torch.Tensor:
+    percentiles = torch.zeros_like(scores)
+    grouped: Dict[str, List[int]] = {}
+    for node_id, node_type in enumerate(node_types):
+        grouped.setdefault(node_type, []).append(node_id)
+
+    for _, node_ids in grouped.items():
+        idx = torch.tensor(node_ids, dtype=torch.long)
+        group_scores = scores[idx]
+        if group_scores.numel() <= 1:
+            percentiles[idx] = 1.0
+            continue
+        order = torch.argsort(group_scores, descending=True)
+        ranks = torch.empty_like(order, dtype=torch.float32)
+        ranks[order] = torch.arange(group_scores.numel(), dtype=torch.float32)
+        percentiles[idx] = 1.0 - ranks / float(group_scores.numel() - 1)
+
+    return percentiles
+
+
+def build_history_source_percentiles_by_uuid(
+    scores: torch.Tensor,
+    nodes_rows: List[Dict[str, str]],
+    node_types: List[str],
+) -> Dict[str, float]:
+    percentiles = compute_percentile_scores_by_type(scores, node_types)
+    return {
+        row["node_uuid"]: float(percentiles[int(row["node_id"])].item())
+        for row in nodes_rows
+    }
+
+
+def apply_history_boost(
+    base_scores: torch.Tensor,
+    nodes_rows: List[Dict[str, str]],
+    previous_history_percentiles_by_uuid: Dict[str, float] | None,
+    type_weights: Dict[str, float],
+) -> torch.Tensor:
+    if not previous_history_percentiles_by_uuid:
+        return base_scores.clone()
+
+    boosted = base_scores.clone()
+    for row in nodes_rows:
+        node_id = int(row["node_id"])
+        node_uuid = row["node_uuid"]
+        node_type = row["node_type"]
+        history_percentile = previous_history_percentiles_by_uuid.get(node_uuid)
+        if history_percentile is None:
+            continue
+        history_weight = float(type_weights.get(node_type, 0.0))
+        if history_weight <= 0.0:
+            continue
+        boosted[node_id] = boosted[node_id] * (1.0 + history_weight * history_percentile)
+    return boosted
+
+
 def compute_all_score_methods(
     num_nodes: int,
     edge_index: torch.Tensor,
     edge_error: torch.Tensor,
     node_types: List[str] | None = None,
+    nodes_rows: List[Dict[str, str]] | None = None,
+    previous_history_percentiles_by_uuid: Dict[str, float] | None = None,
 ) -> Dict[str, torch.Tensor]:
     mean_scores = compute_node_scores_mean(num_nodes, edge_index, edge_error)
     max_scores = compute_node_scores_max(num_nodes, edge_index, edge_error)
@@ -210,7 +300,7 @@ def compute_all_score_methods(
         min_scale=0.25,
     )
 
-    return {
+    score_methods = {
         "mean": mean_scores,
         "max": max_scores,
         "top5_mean": top5_scores,
@@ -225,6 +315,17 @@ def compute_all_score_methods(
         "top10_mean_log_support_floor32_file": top10_log_support_floor32_file_scores,
     }
 
+    if nodes_rows is not None and node_types is not None:
+        for method_name, config in HISTORY_METHOD_CONFIGS.items():
+            score_methods[method_name] = apply_history_boost(
+                base_scores=score_methods[str(config["base_method"])],
+                nodes_rows=nodes_rows,
+                previous_history_percentiles_by_uuid=previous_history_percentiles_by_uuid,
+                type_weights=dict(config["type_weights"]),
+            )
+
+    return score_methods
+
 
 def compute_node_scores_by_method(
     num_nodes: int,
@@ -232,8 +333,17 @@ def compute_node_scores_by_method(
     edge_error: torch.Tensor,
     method: str,
     node_types: List[str] | None = None,
+    nodes_rows: List[Dict[str, str]] | None = None,
+    previous_history_percentiles_by_uuid: Dict[str, float] | None = None,
 ) -> torch.Tensor:
-    score_methods = compute_all_score_methods(num_nodes, edge_index, edge_error, node_types=node_types)
+    score_methods = compute_all_score_methods(
+        num_nodes,
+        edge_index,
+        edge_error,
+        node_types=node_types,
+        nodes_rows=nodes_rows,
+        previous_history_percentiles_by_uuid=previous_history_percentiles_by_uuid,
+    )
     if method not in score_methods:
         raise ValueError(f"Unsupported score method: {method}")
     return score_methods[method]

@@ -7,7 +7,12 @@ from typing import Dict, List
 
 import torch
 
-from score_aggregation import SCORE_METHODS, compute_node_scores_by_method
+from score_aggregation import (
+    HISTORY_SOURCE_METHOD,
+    SCORE_METHODS,
+    build_history_source_percentiles_by_uuid,
+    compute_all_score_methods,
+)
 from score_calibration import CALIBRATION_METHODS, calibrate_scores_by_method
 from train_gnn import (
     DEFAULT_EVAL_GRAPHS,
@@ -218,7 +223,8 @@ def evaluate_single_graph(
     window_output_dir: Path,
     message_passing_type: str,
     relation_group_scheme: str,
-) -> Dict[str, object]:
+    previous_history_percentiles_by_uuid: Dict[str, float] | None,
+) -> tuple[Dict[str, object], Dict[str, float]]:
     payload = prepare_graph_payload(
         graph_path,
         device=device,
@@ -238,12 +244,21 @@ def evaluate_single_graph(
 
     nodes_rows = read_nodes_table(graph_path.parent / "nodes.tsv")
     node_types = [row["node_type"] for row in nodes_rows]
-    base_scores = compute_node_scores_by_method(
+    edge_index_cpu = payload["edge_index"].detach().cpu()
+    edge_error_cpu = edge_error.detach().cpu().to(dtype=torch.float32)
+    score_methods = compute_all_score_methods(
         payload["num_nodes"],
-        payload["edge_index"].detach().cpu(),
-        edge_error.detach().cpu().to(dtype=torch.float32),
-        base_score_method,
+        edge_index_cpu,
+        edge_error_cpu,
         node_types=node_types,
+        nodes_rows=nodes_rows,
+        previous_history_percentiles_by_uuid=previous_history_percentiles_by_uuid,
+    )
+    base_scores = score_methods[base_score_method]
+    next_history_percentiles_by_uuid = build_history_source_percentiles_by_uuid(
+        score_methods[HISTORY_SOURCE_METHOD],
+        nodes_rows,
+        node_types,
     )
     y_cpu = payload["y"].detach().cpu().to(dtype=torch.float32)
 
@@ -271,7 +286,7 @@ def evaluate_single_graph(
     ensure_dir(window_output_dir)
     with (window_output_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2)
-    return summary
+    return summary, next_history_percentiles_by_uuid
 
 
 def print_method_summary(method_name: str, summary: Dict[str, object]) -> None:
@@ -339,15 +354,17 @@ def main() -> None:
         "best_record": checkpoint.get("best_record"),
         "selection_metric": config.get("selection_metric"),
         "base_score_method": args.base_score_method,
+        "history_source_method": HISTORY_SOURCE_METHOD,
         "topk": topk,
         "graphs": [],
     }
 
+    previous_history_percentiles_by_uuid: Dict[str, float] | None = None
     for graph_path in graph_paths:
         graph_path = graph_path.resolve()
         window_name = graph_path.parent.name
         print(f"[compare-score-calibs] evaluating {window_name}", flush=True)
-        summary = evaluate_single_graph(
+        summary, previous_history_percentiles_by_uuid = evaluate_single_graph(
             model=model,
             graph_path=graph_path,
             device=device,
@@ -356,6 +373,7 @@ def main() -> None:
             window_output_dir=run_dir / window_name,
             message_passing_type=message_passing_type,
             relation_group_scheme=relation_group_scheme,
+            previous_history_percentiles_by_uuid=previous_history_percentiles_by_uuid,
         )
         aggregate["graphs"].append(summary)
         for method_name, method_summary in summary["methods"].items():
