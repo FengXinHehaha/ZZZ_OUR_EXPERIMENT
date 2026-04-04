@@ -46,6 +46,7 @@ VIEW_INPUT_DIMS = {
 
 DECODER_TYPES = ("dot", "mlp", "rel_mlp")
 MESSAGE_PASSING_TYPES = ("vanilla", "rel_grouped", "rgcn")
+LOSS_TYPES = ("bce", "focal")
 
 SELECTION_METRICS = {
     "val_edge_loss": ("val", "edge_loss", "min"),
@@ -118,6 +119,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=60, help="Number of training epochs.")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
     parser.add_argument("--weight-decay", type=float, default=1e-5, help="AdamW weight decay.")
+    parser.add_argument(
+        "--loss-type",
+        type=str,
+        default="bce",
+        choices=sorted(LOSS_TYPES),
+        help="Edge reconstruction loss. Default: bce.",
+    )
+    parser.add_argument(
+        "--focal-gamma",
+        type=float,
+        default=2.0,
+        help="Gamma for --loss-type=focal. Ignored for BCE. Default: 2.0.",
+    )
+    parser.add_argument(
+        "--pos-loss-weight",
+        type=float,
+        default=1.0,
+        help="Multiplier on the positive-edge loss term. Default: 1.0.",
+    )
+    parser.add_argument(
+        "--neg-loss-weight",
+        type=float,
+        default=1.0,
+        help="Multiplier on the negative-edge loss term. Default: 1.0.",
+    )
+    parser.add_argument(
+        "--negative-samples-per-positive",
+        type=float,
+        default=1.0,
+        help="How many sampled negatives to draw per positive edge. Default: 1.0.",
+    )
     parser.add_argument(
         "--train-pos-edge-cap",
         type=int,
@@ -211,6 +243,31 @@ def sample_negative_edge_types(positive_edge_type: torch.Tensor) -> torch.Tensor
         return positive_edge_type
     perm = torch.randperm(positive_edge_type.shape[0], device=positive_edge_type.device)
     return positive_edge_type[perm]
+
+
+def negative_sample_count(num_positive_edges: int, negative_samples_per_positive: float) -> int:
+    if num_positive_edges <= 0:
+        return 0
+    return max(1, int(math.ceil(num_positive_edges * negative_samples_per_positive)))
+
+
+def edge_loss_term(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    loss_type: str,
+    focal_gamma: float,
+) -> torch.Tensor:
+    if loss_type == "bce":
+        return F.binary_cross_entropy_with_logits(logits, targets)
+
+    if loss_type != "focal":
+        raise ValueError(f"Unsupported loss type: {loss_type}")
+
+    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    probabilities = torch.sigmoid(logits)
+    pt = torch.where(targets > 0.5, probabilities, 1.0 - probabilities)
+    focal_weight = torch.pow((1.0 - pt).clamp_min(1e-8), focal_gamma)
+    return (focal_weight * bce).mean()
 
 
 def compute_node_scores(num_nodes: int, edge_index: torch.Tensor, edge_error: torch.Tensor) -> torch.Tensor:
@@ -563,6 +620,11 @@ def evaluate_graph(
     model: MultiViewFullBatchGAE,
     graph_payload: Dict[str, object],
     edge_cap: int,
+    loss_type: str,
+    focal_gamma: float,
+    pos_loss_weight: float,
+    neg_loss_weight: float,
+    negative_samples_per_positive: float,
 ) -> Dict[str, object]:
     validate_matching_view_input_dims(model.view_input_dims, graph_payload["view_input_dims"], graph_payload["name"])
     model.eval()
@@ -579,15 +641,28 @@ def evaluate_graph(
             graph_payload["edge_type"],
             edge_cap,
         )
-        negative_edges = sample_negative_edges(graph_payload["num_nodes"], positive_edges.shape[1], z_fused.device)
-        negative_edge_type = sample_negative_edge_types(positive_edge_type)
+        num_negative_edges = negative_sample_count(
+            int(positive_edges.shape[1]),
+            negative_samples_per_positive,
+        )
+        negative_edges = sample_negative_edges(graph_payload["num_nodes"], num_negative_edges, z_fused.device)
+        if positive_edge_type.numel() == 0:
+            negative_edge_type = positive_edge_type
+        else:
+            sampled_indices = torch.randint(
+                0,
+                positive_edge_type.shape[0],
+                (num_negative_edges,),
+                device=positive_edge_type.device,
+            )
+            negative_edge_type = positive_edge_type[sampled_indices]
 
         pos_logits = model.decode_edges(z_fused, positive_edges, positive_edge_type)
         neg_logits = model.decode_edges(z_fused, negative_edges, negative_edge_type)
 
-        pos_loss = F.binary_cross_entropy_with_logits(pos_logits, torch.ones_like(pos_logits))
-        neg_loss = F.binary_cross_entropy_with_logits(neg_logits, torch.zeros_like(neg_logits))
-        edge_loss = float((pos_loss + neg_loss).item())
+        pos_loss = edge_loss_term(pos_logits, torch.ones_like(pos_logits), loss_type, focal_gamma)
+        neg_loss = edge_loss_term(neg_logits, torch.zeros_like(neg_logits), loss_type, focal_gamma)
+        edge_loss = float((pos_loss_weight * pos_loss + neg_loss_weight * neg_loss).item())
 
         edge_error = 1.0 - torch.sigmoid(
             model.decode_edges(z_fused, graph_payload["edge_index"], graph_payload["edge_type"])
@@ -620,6 +695,11 @@ def train_epoch(
     train_payload: Dict[str, object],
     optimizer: torch.optim.Optimizer,
     train_pos_edge_cap: int,
+    loss_type: str,
+    focal_gamma: float,
+    pos_loss_weight: float,
+    neg_loss_weight: float,
+    negative_samples_per_positive: float,
 ) -> Dict[str, float]:
     validate_matching_view_input_dims(model.view_input_dims, train_payload["view_input_dims"], train_payload["name"])
     model.train()
@@ -637,15 +717,28 @@ def train_epoch(
         train_payload["edge_type"],
         train_pos_edge_cap,
     )
-    negative_edges = sample_negative_edges(train_payload["num_nodes"], positive_edges.shape[1], z_fused.device)
-    negative_edge_type = sample_negative_edge_types(positive_edge_type)
+    num_negative_edges = negative_sample_count(
+        int(positive_edges.shape[1]),
+        negative_samples_per_positive,
+    )
+    negative_edges = sample_negative_edges(train_payload["num_nodes"], num_negative_edges, z_fused.device)
+    if positive_edge_type.numel() == 0:
+        negative_edge_type = positive_edge_type
+    else:
+        sampled_indices = torch.randint(
+            0,
+            positive_edge_type.shape[0],
+            (num_negative_edges,),
+            device=positive_edge_type.device,
+        )
+        negative_edge_type = positive_edge_type[sampled_indices]
 
     pos_logits = model.decode_edges(z_fused, positive_edges, positive_edge_type)
     neg_logits = model.decode_edges(z_fused, negative_edges, negative_edge_type)
 
-    pos_loss = F.binary_cross_entropy_with_logits(pos_logits, torch.ones_like(pos_logits))
-    neg_loss = F.binary_cross_entropy_with_logits(neg_logits, torch.zeros_like(neg_logits))
-    loss = pos_loss + neg_loss
+    pos_loss = edge_loss_term(pos_logits, torch.ones_like(pos_logits), loss_type, focal_gamma)
+    neg_loss = edge_loss_term(neg_logits, torch.zeros_like(neg_logits), loss_type, focal_gamma)
+    loss = pos_loss_weight * pos_loss + neg_loss_weight * neg_loss
     loss.backward()
     optimizer.step()
 
@@ -660,6 +753,7 @@ def train_epoch(
         "mean_gate_alpha_file": float(gate_alpha[1]),
         "mean_gate_alpha_network": float(gate_alpha[2]),
         "num_train_edges": int(positive_edges.shape[1]),
+        "num_negative_edges": int(num_negative_edges),
     }
 
 
@@ -747,6 +841,11 @@ def main() -> None:
         "epochs": args.epochs,
         "lr": args.lr,
         "weight_decay": args.weight_decay,
+        "loss_type": args.loss_type,
+        "focal_gamma": args.focal_gamma,
+        "pos_loss_weight": args.pos_loss_weight,
+        "neg_loss_weight": args.neg_loss_weight,
+        "negative_samples_per_positive": args.negative_samples_per_positive,
         "train_pos_edge_cap": args.train_pos_edge_cap,
         "eval_pos_edge_cap": args.eval_pos_edge_cap,
         "run_name": run_name,
@@ -762,9 +861,23 @@ def main() -> None:
             train_payload=train_payload,
             optimizer=optimizer,
             train_pos_edge_cap=args.train_pos_edge_cap,
+            loss_type=args.loss_type,
+            focal_gamma=args.focal_gamma,
+            pos_loss_weight=args.pos_loss_weight,
+            neg_loss_weight=args.neg_loss_weight,
+            negative_samples_per_positive=args.negative_samples_per_positive,
         )
         eval_metrics = [
-            evaluate_graph(model=model, graph_payload=payload, edge_cap=args.eval_pos_edge_cap)
+            evaluate_graph(
+                model=model,
+                graph_payload=payload,
+                edge_cap=args.eval_pos_edge_cap,
+                loss_type=args.loss_type,
+                focal_gamma=args.focal_gamma,
+                pos_loss_weight=args.pos_loss_weight,
+                neg_loss_weight=args.neg_loss_weight,
+                negative_samples_per_positive=args.negative_samples_per_positive,
+            )
             for payload in eval_payloads
         ]
 
@@ -782,6 +895,7 @@ def main() -> None:
             f"loss={train_metrics['loss']:.6f} "
             f"pos_loss={train_metrics['pos_loss']:.6f} "
             f"neg_loss={train_metrics['neg_loss']:.6f} "
+            f"neg_edges={train_metrics['num_negative_edges']} "
             f"seconds={elapsed:.2f}",
             flush=True,
         )
