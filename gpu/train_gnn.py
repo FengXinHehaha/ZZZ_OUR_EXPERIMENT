@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from graph_loader import (
+    VIEW_GROUP_ORDER,
     build_all_view_matrices,
     build_event_type_adjacencies,
     build_normalized_adjacency,
@@ -261,6 +262,40 @@ def selection_score(eval_metrics: List[Dict[str, object]], selection_metric: str
     return float(value), mode
 
 
+def infer_view_input_dims_from_graph(graph: Dict[str, object]) -> Dict[str, int]:
+    feature_groups = graph["feature_groups"]
+    return {
+        view_name: sum(int(feature_groups[group_name]["x"].shape[1]) for group_name in group_names)
+        for view_name, group_names in VIEW_GROUP_ORDER.items()
+    }
+
+
+def normalize_view_input_dims(view_input_dims: Dict[str, object] | None) -> Dict[str, int]:
+    if view_input_dims is None:
+        return {key: int(value) for key, value in VIEW_INPUT_DIMS.items()}
+
+    normalized = {}
+    for view_name in VIEW_GROUP_ORDER:
+        if view_name not in view_input_dims:
+            raise ValueError(f"Missing view_input_dims entry for {view_name}")
+        normalized[view_name] = int(view_input_dims[view_name])
+    return normalized
+
+
+def validate_matching_view_input_dims(
+    reference: Dict[str, object],
+    candidate: Dict[str, object],
+    context: str,
+) -> None:
+    normalized_reference = normalize_view_input_dims(reference)
+    normalized_candidate = normalize_view_input_dims(candidate)
+    if normalized_reference != normalized_candidate:
+        raise ValueError(
+            f"{context} has mismatched view_input_dims: "
+            f"expected={normalized_reference} actual={normalized_candidate}"
+        )
+
+
 class SparseGCNLayer(nn.Module):
     def __init__(self, in_dim: int, out_dim: int) -> None:
         super().__init__()
@@ -324,6 +359,7 @@ class MultiViewFullBatchGAE(nn.Module):
         hidden_dim: int,
         latent_dim: int,
         dropout: float,
+        view_input_dims: Dict[str, int] | None = None,
         decoder_type: str = "dot",
         decoder_hidden_dim: int = 64,
         message_passing_type: str = "vanilla",
@@ -333,21 +369,26 @@ class MultiViewFullBatchGAE(nn.Module):
     ) -> None:
         super().__init__()
         self.message_passing_type = message_passing_type
+        self.view_input_dims = normalize_view_input_dims(view_input_dims)
         if message_passing_type == "vanilla":
             encoder_cls = VanillaViewEncoder
-            self.process_encoder = encoder_cls(VIEW_INPUT_DIMS["process_view"], hidden_dim, latent_dim, dropout)
-            self.file_encoder = encoder_cls(VIEW_INPUT_DIMS["file_view"], hidden_dim, latent_dim, dropout)
-            self.network_encoder = encoder_cls(VIEW_INPUT_DIMS["network_view"], hidden_dim, latent_dim, dropout)
+            self.process_encoder = encoder_cls(self.view_input_dims["process_view"], hidden_dim, latent_dim, dropout)
+            self.file_encoder = encoder_cls(self.view_input_dims["file_view"], hidden_dim, latent_dim, dropout)
+            self.network_encoder = encoder_cls(self.view_input_dims["network_view"], hidden_dim, latent_dim, dropout)
         elif message_passing_type in {"rel_grouped", "rgcn"}:
             if num_relation_groups <= 0:
                 raise ValueError(
                     "num_relation_groups must be positive when message_passing_type is relation-aware"
                 )
             encoder_cls = RelationGroupedViewEncoder if message_passing_type == "rel_grouped" else RGCNViewEncoder
-            self.process_encoder = encoder_cls(VIEW_INPUT_DIMS["process_view"], hidden_dim, latent_dim, dropout, num_relation_groups)
-            self.file_encoder = encoder_cls(VIEW_INPUT_DIMS["file_view"], hidden_dim, latent_dim, dropout, num_relation_groups)
+            self.process_encoder = encoder_cls(
+                self.view_input_dims["process_view"], hidden_dim, latent_dim, dropout, num_relation_groups
+            )
+            self.file_encoder = encoder_cls(
+                self.view_input_dims["file_view"], hidden_dim, latent_dim, dropout, num_relation_groups
+            )
             self.network_encoder = encoder_cls(
-                VIEW_INPUT_DIMS["network_view"], hidden_dim, latent_dim, dropout, num_relation_groups
+                self.view_input_dims["network_view"], hidden_dim, latent_dim, dropout, num_relation_groups
             )
         else:
             raise ValueError(f"Unsupported message passing type: {message_passing_type}")
@@ -449,6 +490,7 @@ def prepare_graph_payload(
 ) -> Dict[str, object]:
     graph = load_graph(graph_path)
     summary = summarize_graph(graph)
+    view_input_dims = infer_view_input_dims_from_graph(graph)
     views = build_all_view_matrices(graph)
 
     x_views = {
@@ -503,6 +545,7 @@ def prepare_graph_payload(
         "path": str(graph_path),
         "name": graph_window_name(graph_path),
         "summary": summary,
+        "view_input_dims": view_input_dims,
         "num_nodes": int(graph["num_nodes"]),
         "edge_index": edge_index,
         "edge_type": edge_type,
@@ -521,6 +564,7 @@ def evaluate_graph(
     graph_payload: Dict[str, object],
     edge_cap: int,
 ) -> Dict[str, object]:
+    validate_matching_view_input_dims(model.view_input_dims, graph_payload["view_input_dims"], graph_payload["name"])
     model.eval()
     with torch.no_grad():
         encoded = model.encode(
@@ -577,6 +621,7 @@ def train_epoch(
     optimizer: torch.optim.Optimizer,
     train_pos_edge_cap: int,
 ) -> Dict[str, float]:
+    validate_matching_view_input_dims(model.view_input_dims, train_payload["view_input_dims"], train_payload["name"])
     model.train()
     optimizer.zero_grad(set_to_none=True)
 
@@ -656,11 +701,18 @@ def main() -> None:
 
     print("[train-gnn] loaded train graph summary:", flush=True)
     print(json.dumps(train_payload["summary"], indent=2), flush=True)
+    for payload in eval_payloads:
+        validate_matching_view_input_dims(
+            train_payload["view_input_dims"],
+            payload["view_input_dims"],
+            f"eval graph {payload['name']}",
+        )
 
     model = MultiViewFullBatchGAE(
         hidden_dim=args.hidden_dim,
         latent_dim=args.latent_dim,
         dropout=args.dropout,
+        view_input_dims=train_payload["view_input_dims"],
         decoder_type=args.decoder_type,
         decoder_hidden_dim=args.decoder_hidden_dim,
         message_passing_type=args.message_passing_type,
@@ -683,6 +735,7 @@ def main() -> None:
         "seed": args.seed,
         "hidden_dim": args.hidden_dim,
         "latent_dim": args.latent_dim,
+        "view_input_dims": train_payload["view_input_dims"],
         "message_passing_type": args.message_passing_type,
         "relation_group_scheme": args.relation_group_scheme,
         "num_relation_groups": len(train_payload.get("relation_group_names", [])),

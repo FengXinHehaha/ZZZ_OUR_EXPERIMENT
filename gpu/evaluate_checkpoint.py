@@ -16,6 +16,7 @@ from train_gnn import (
     maybe_cap_edges,
     prepare_graph_payload,
     sample_negative_edge_types,
+    validate_matching_view_input_dims,
 )
 
 
@@ -150,6 +151,7 @@ def evaluate_single_graph(
         message_passing_type=message_passing_type,
         relation_group_scheme=relation_group_scheme,
     )
+    validate_matching_view_input_dims(model.view_input_dims, payload["view_input_dims"], payload["name"])
 
     model.eval()
     with torch.no_grad():
@@ -266,12 +268,22 @@ def main() -> None:
     run_name = args.run_name or f"eval_{checkpoint_path.parent.name}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
     run_dir = output_dir / run_name
     ensure_dir(run_dir)
+    message_passing_type = str(config.get("message_passing_type", "vanilla"))
+    relation_group_scheme = str(config.get("relation_group_scheme", "coarse_v1"))
+    reference_payload = prepare_graph_payload(
+        graph_paths[0],
+        device=device,
+        restrict_to_normal_edges=False,
+        message_passing_type=message_passing_type,
+        relation_group_scheme=relation_group_scheme,
+    )
 
     model = MultiViewFullBatchGAE(
         hidden_dim=int(config["hidden_dim"]),
         latent_dim=int(config["latent_dim"]),
         dropout=float(config["dropout"]),
-        message_passing_type=str(config.get("message_passing_type", "vanilla")),
+        view_input_dims=config.get("view_input_dims", reference_payload["view_input_dims"]),
+        message_passing_type=message_passing_type,
         num_relation_groups=int(config.get("num_relation_groups", 0)),
         decoder_type=str(config.get("decoder_type", "dot")),
         decoder_hidden_dim=int(config.get("decoder_hidden_dim", config["latent_dim"] * 2)),
@@ -309,8 +321,8 @@ def main() -> None:
             score_calibration=args.score_calibration,
             topk=topk,
             window_output_dir=run_dir / window_name,
-            message_passing_type=str(config.get("message_passing_type", "vanilla")),
-            relation_group_scheme=str(config.get("relation_group_scheme", "coarse_v1")),
+            message_passing_type=message_passing_type,
+            relation_group_scheme=relation_group_scheme,
         )
         aggregate["graphs"].append(summary)
         print(
