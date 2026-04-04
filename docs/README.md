@@ -16,3 +16,4 @@ Implemented notes:
 - `cadets_edge_filter.md` defines how to further filter typed edges without revisiting raw events
 - `gpu_baseline_summary.md` records the current GPU baseline conclusions, ablations, and recommended next directions
 - `file_node_analysis_summary.md` records the current file-node error analysis, support-aware scorer, and adaptive threshold policy
+- `paper_result_tables.md` reformats the current baseline and best-candidate results into paper-facing comparison tables
