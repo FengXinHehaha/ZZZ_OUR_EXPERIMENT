@@ -184,6 +184,8 @@ def main() -> None:
         "checkpoint_epoch": summary["checkpoint_epoch"],
         "score_method": summary.get("score_method"),
         "score_calibration": summary.get("score_calibration"),
+        "post_rerank_method": summary.get("post_rerank_method"),
+        "post_rerank_candidate_rank_max": summary.get("post_rerank_candidate_rank_max"),
         "policy_config": {
             "sparse_score_threshold": args.sparse_score_threshold,
             "sparse_max_count": args.sparse_max_count,
@@ -204,6 +206,12 @@ def main() -> None:
         print(f"[adaptive-threshold] score_method={summary['score_method']}", flush=True)
     if summary.get("score_calibration") is not None:
         print(f"[adaptive-threshold] score_calibration={summary['score_calibration']}", flush=True)
+    if summary.get("post_rerank_method") is not None:
+        print(
+            f"[adaptive-threshold] post_rerank_method={summary['post_rerank_method']} "
+            f"candidate_rank_max={summary.get('post_rerank_candidate_rank_max')}",
+            flush=True,
+        )
     print(f"[adaptive-threshold] policy_config={results['policy_config']}", flush=True)
 
     for graph in graphs:

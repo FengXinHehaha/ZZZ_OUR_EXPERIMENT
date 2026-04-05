@@ -7,6 +7,11 @@ from typing import Dict, List
 
 import torch
 
+from file_reranking import (
+    POST_RERANK_METHODS,
+    build_previous_file_percentiles,
+    rerank_scored_rows_for_graph,
+)
 from score_calibration import CALIBRATION_METHODS, calibrate_scores_by_method
 from score_aggregation import (
     HISTORY_SOURCE_METHOD,
@@ -71,6 +76,19 @@ def parse_args() -> argparse.Namespace:
         default="robust_zscore_by_type",
         choices=sorted(CALIBRATION_METHODS),
         help="Optional node-type calibration after score aggregation. Default: robust_zscore_by_type.",
+    )
+    parser.add_argument(
+        "--post-rerank-method",
+        type=str,
+        default="none",
+        choices=sorted(POST_RERANK_METHODS),
+        help="Optional second-stage reranker applied after calibration. Default: none.",
+    )
+    parser.add_argument(
+        "--post-rerank-candidate-rank-max",
+        type=int,
+        default=10000,
+        help="Only rerank file nodes whose current rank is at most this cutoff. Default: 10000.",
     )
     parser.add_argument(
         "--topk",
@@ -150,12 +168,15 @@ def evaluate_single_graph(
     edge_cap: int,
     score_method: str,
     score_calibration: str,
+    post_rerank_method: str,
+    post_rerank_candidate_rank_max: int,
     topk: List[int],
     window_output_dir: Path,
     message_passing_type: str,
     relation_group_scheme: str,
     previous_history_percentiles_by_uuid: Dict[str, float] | None,
-) -> tuple[Dict[str, object], Dict[str, float]]:
+    previous_post_rerank_file_percentiles_by_uuid: Dict[str, float] | None,
+) -> tuple[Dict[str, object], Dict[str, float], Dict[str, float]]:
     payload = prepare_graph_payload(
         graph_path,
         device=device,
@@ -219,7 +240,6 @@ def evaluate_single_graph(
         gate_means = encoded["gate_alpha"].mean(dim=0).detach().cpu().tolist()
 
     node_scores = calibrate_scores_by_method(base_scores, node_types, score_calibration)
-    node_metrics = compute_binary_metrics(payload["y"].detach().cpu().to(dtype=torch.float32), node_scores)
     scored_rows: List[Dict[str, object]] = []
     for row in nodes_rows:
         node_id = int(row["node_id"])
@@ -236,6 +256,22 @@ def evaluate_single_graph(
     scored_rows.sort(key=lambda item: item["score"], reverse=True)
     for rank, row in enumerate(scored_rows, start=1):
         row["rank"] = rank
+
+    next_post_rerank_file_percentiles_by_uuid = build_previous_file_percentiles(scored_rows)
+    if post_rerank_method != "none":
+        scored_rows = rerank_scored_rows_for_graph(
+            rows=scored_rows,
+            graph_path=graph_path,
+            relation_group_scheme=relation_group_scheme,
+            method_name=post_rerank_method,
+            candidate_rank_max=post_rerank_candidate_rank_max,
+            previous_file_percentiles_by_uuid=previous_post_rerank_file_percentiles_by_uuid,
+        )
+
+    reranked_scores = torch.zeros(payload["num_nodes"], dtype=torch.float32)
+    for row in scored_rows:
+        reranked_scores[int(row["node_id"])] = float(row["score"])
+    node_metrics = compute_binary_metrics(payload["y"].detach().cpu().to(dtype=torch.float32), reranked_scores)
 
     ensure_dir(window_output_dir)
     node_scores_path = window_output_dir / "node_scores.tsv"
@@ -267,6 +303,8 @@ def evaluate_single_graph(
         },
         "score_method": score_method,
         "score_calibration": score_calibration,
+        "post_rerank_method": post_rerank_method,
+        "post_rerank_candidate_rank_max": post_rerank_candidate_rank_max,
         "topk": topk_summary,
         "node_scores_file": str(node_scores_path),
     }
@@ -274,7 +312,7 @@ def evaluate_single_graph(
     with (window_output_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2)
 
-    return summary, next_history_percentiles_by_uuid
+    return summary, next_history_percentiles_by_uuid, next_post_rerank_file_percentiles_by_uuid
 
 
 def main() -> None:
@@ -328,6 +366,8 @@ def main() -> None:
         "selection_metric": config.get("selection_metric"),
         "score_method": args.score_method,
         "score_calibration": args.score_calibration,
+        "post_rerank_method": args.post_rerank_method,
+        "post_rerank_candidate_rank_max": args.post_rerank_candidate_rank_max,
         "history_source_method": HISTORY_SOURCE_METHOD,
         "history_reset_before_windows": list(args.history_reset_before_window),
         "graphs": [],
@@ -335,24 +375,29 @@ def main() -> None:
 
     history_reset_before_windows = set(args.history_reset_before_window)
     previous_history_percentiles_by_uuid: Dict[str, float] | None = None
+    previous_post_rerank_file_percentiles_by_uuid: Dict[str, float] | None = None
     for graph_path in graph_paths:
         graph_path = graph_path.resolve()
         window_name = graph_path.parent.name
         if window_name in history_reset_before_windows:
             previous_history_percentiles_by_uuid = None
+            previous_post_rerank_file_percentiles_by_uuid = None
         print(f"[eval-checkpoint] evaluating {window_name}", flush=True)
-        summary, previous_history_percentiles_by_uuid = evaluate_single_graph(
+        summary, previous_history_percentiles_by_uuid, previous_post_rerank_file_percentiles_by_uuid = evaluate_single_graph(
             model=model,
             graph_path=graph_path,
             device=device,
             edge_cap=args.edge_cap,
             score_method=args.score_method,
             score_calibration=args.score_calibration,
+            post_rerank_method=args.post_rerank_method,
+            post_rerank_candidate_rank_max=args.post_rerank_candidate_rank_max,
             topk=topk,
             window_output_dir=run_dir / window_name,
             message_passing_type=message_passing_type,
             relation_group_scheme=relation_group_scheme,
             previous_history_percentiles_by_uuid=previous_history_percentiles_by_uuid,
+            previous_post_rerank_file_percentiles_by_uuid=previous_post_rerank_file_percentiles_by_uuid,
         )
         aggregate["graphs"].append(summary)
         print(
@@ -360,6 +405,7 @@ def main() -> None:
             f"roc_auc={summary['roc_auc']} ap={summary['average_precision']} "
             f"score_method={summary['score_method']} "
             f"score_calibration={summary['score_calibration']} "
+            f"post_rerank_method={summary['post_rerank_method']} "
             f"edge_loss={summary['edge_loss']:.6f}",
             flush=True,
         )

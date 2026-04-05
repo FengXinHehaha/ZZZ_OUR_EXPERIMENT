@@ -77,6 +77,11 @@ def main() -> None:
         print(f"[evaluation-summary] score_method={summary['score_method']}")
     if summary.get("score_calibration") is not None:
         print(f"[evaluation-summary] score_calibration={summary['score_calibration']}")
+    if summary.get("post_rerank_method") is not None:
+        print(
+            f"[evaluation-summary] post_rerank_method={summary['post_rerank_method']} "
+            f"candidate_rank_max={summary.get('post_rerank_candidate_rank_max')}"
+        )
     if summary.get("best_record") is not None:
         best_record = summary["best_record"]
         print(
@@ -93,6 +98,7 @@ def main() -> None:
             f"ap={graph['average_precision']} "
             f"score_method={graph.get('score_method')} "
             f"score_calibration={graph.get('score_calibration')} "
+            f"post_rerank_method={graph.get('post_rerank_method')} "
             f"edge_loss={graph['edge_loss']:.6f} "
             f"gt_nodes={graph['gt_nodes']}"
         )

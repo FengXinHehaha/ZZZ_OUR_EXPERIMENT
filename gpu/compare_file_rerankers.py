@@ -8,11 +8,16 @@ from typing import Dict, Iterable, List
 import torch
 
 from analyze_file_false_positives import (
-    compute_selected_node_stats,
     load_json,
     load_scored_rows,
     percentile as linear_percentile,
     resolve_window_graph_paths,
+)
+from file_reranking import (
+    POST_RERANK_METHODS,
+    build_previous_file_percentiles,
+    candidate_file_rows,
+    rerank_scored_rows_for_graph,
 )
 from train_gnn import compute_binary_metrics
 
@@ -149,41 +154,11 @@ def summarize_gt_ranks(ranks: List[int], total_nodes: int) -> Dict[str, float]:
     }
 
 
-def compute_percentile_lookup(values_by_key: Dict[str, float]) -> Dict[str, float]:
-    if not values_by_key:
-        return {}
-    ordered = sorted(values_by_key.items(), key=lambda item: item[1], reverse=True)
-    if len(ordered) == 1:
-        key, _ = ordered[0]
-        return {key: 1.0}
-    lookup: Dict[str, float] = {}
-    denom = float(len(ordered) - 1)
-    for rank, (key, _) in enumerate(ordered):
-        lookup[key] = 1.0 - rank / denom
-    return lookup
-
-
-def build_previous_file_percentiles(rows: List[Dict[str, object]]) -> Dict[str, float]:
-    file_scores = {
-        str(row["node_uuid"]): float(row["score"])
-        for row in rows
-        if str(row["node_type"]) == "file"
-    }
-    return compute_percentile_lookup(file_scores)
-
-
 def clone_rows(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
     cloned: List[Dict[str, object]] = []
     for row in rows:
         cloned.append(dict(row))
     return cloned
-
-
-def candidate_file_rows(rows: List[Dict[str, object]], candidate_rank_max: int) -> List[Dict[str, object]]:
-    return [
-        row for row in rows
-        if str(row["node_type"]) == "file" and int(row["rank"]) <= candidate_rank_max
-    ]
 
 
 def build_candidate_feature_tables(
@@ -328,11 +303,7 @@ def main() -> None:
     ensure_dir(run_dir)
 
     topk = args.topk or [100, 500, 1000, 5000, 10000]
-    methods = [
-        "base_score",
-        "file_rerank_support",
-        "file_rerank_support_history",
-    ]
+    methods = ["base_score", *[method for method in POST_RERANK_METHODS if method != "none"]]
     history_reset_before_windows = set(args.history_reset_before_window)
 
     results = {
@@ -362,12 +333,6 @@ def main() -> None:
         base_rows = load_scored_rows(eval_dir, window_name)
         candidate_rows = candidate_file_rows(base_rows, args.candidate_rank_max)
         graph_path = window_graph_paths[window_name]
-        selected_node_ids = [int(row["node_id"]) for row in candidate_rows]
-        node_stats = compute_selected_node_stats(
-            graph_path=graph_path,
-            selected_node_ids=selected_node_ids,
-            relation_group_scheme=args.relation_group_scheme,
-        )
 
         print(
             f"[compare-file-rerankers] evaluating {window_name} "
@@ -379,12 +344,13 @@ def main() -> None:
         window_output_dir = run_dir / window_name
         ensure_dir(window_output_dir)
         for method_name in methods:
-            reranked_rows = rerank_rows_for_method(
+            reranked_rows = rerank_scored_rows_for_graph(
                 rows=base_rows,
-                candidate_rows=candidate_rows,
-                node_stats=node_stats,
-                previous_file_percentiles_by_uuid=previous_file_percentiles_by_uuid,
+                graph_path=graph_path,
+                relation_group_scheme=args.relation_group_scheme,
                 method_name=method_name,
+                candidate_rank_max=args.candidate_rank_max,
+                previous_file_percentiles_by_uuid=previous_file_percentiles_by_uuid,
             )
             node_scores_path = window_output_dir / method_name / "node_scores.tsv"
             ensure_dir(node_scores_path.parent)
