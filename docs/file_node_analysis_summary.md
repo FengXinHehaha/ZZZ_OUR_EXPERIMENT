@@ -69,7 +69,7 @@ Conclusion:
 - naive file degree penalty is too coarse
 - it hurts the calibrated ranking more than it helps
 
-## Current Best Scoring Pipeline
+## Support-Aware Scoring Breakthrough
 
 The first successful change was a support-aware file score:
 
@@ -111,7 +111,7 @@ The old single-window-local policy:
 
 could still do well on `test_2018-04-12`, but it could not exploit the new ranking quality on sparse windows.
 
-## Current Best Threshold Policy
+## First Adaptive Threshold Policy
 
 We added `gpu/compare_adaptive_threshold_policies.py` and built a first adaptive threshold policy.
 
@@ -133,7 +133,7 @@ This policy maps the three current windows as:
 - `test_2018-04-12 -> dense`
 - `test_2018-04-13 -> sparse`
 
-### Current best end-to-end operating point
+### First end-to-end improvement
 
 Using:
 
@@ -154,15 +154,89 @@ Compared with the old single-policy baseline on `test_2018-04-13`:
 
 - F1: `0.002393 -> 0.051948`
 
-The sparse-window sweep showed `top_count=138` was the best setting among:
+This established the first practical adaptive threshold policy, but it was still built before adding explicit cross-window history.
 
-- `100`
-- `120`
-- `138`
-- `160`
-- `200`
-- `300`
-- `500`
+## Cross-Window History-Aware File Scoring
+
+The next improvement line kept the same training checkpoint and same support-aware base score, but added a cross-window history signal.
+
+### Core idea
+
+- start from `top5_mean_log_support_floor128_file`
+- compute a per-type percentile score for the previous window using the same support-aware score
+- if the same node UUID appears again in the next window, multiply its current score by:
+  - `1 + type_weight * previous_percentile`
+
+We tested three history variants:
+
+- `top5_mean_log_support_floor128_file_history_file_only`
+- `top5_mean_log_support_floor128_file_history_file_process`
+- `top5_mean_log_support_floor128_file_history_all_types`
+
+The result was very clear:
+
+- `file_only` was best
+- adding `process` or `network` history did not produce additional gains
+
+To avoid leakage from `val` into `test_2018-04-12`, the history-aware evaluation scripts were updated to support a reset boundary before a chosen window.
+
+### Ranking-quality comparison after adding history
+
+| Setup | `val` AP | `test_2018-04-12` AP | `test_2018-04-13` AP | `test_2018-04-13` best GT rank | `test_2018-04-13` top-1000 hits |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `top5_mean_log_support_floor128_file + robust_zscore_by_type` | `0.013576` | `0.526376` | `0.011643` | `95` | `10` |
+| `top5_mean_log_support_floor128_file_history_file_only + robust_zscore_by_type` | `0.013576` | `0.526376` | `0.016470` | `93` | `10` |
+
+So the history-aware scorer improved `test_2018-04-13` ranking again:
+
+- AP: `0.011643 -> 0.016470`
+- best GT rank: `95 -> 93`
+
+### Why adaptive v1 no longer fully matched the new scorer
+
+When the old adaptive policy v1 was reused unchanged:
+
+- sparse windows still used `top_count = 138`
+- this preserved the previous `test_2018-04-13` F1 of `0.051948`
+- but it did not fully exploit the new history-aware ranking gain
+
+The reason is simple:
+
+- the extra GT nodes promoted by history mainly appeared below the old sparse cutoff
+- therefore the ranking got better, but the top-138 alarm budget stayed too tight
+
+## Current Strongest Operating Point
+
+We re-swept the sparse top-count for the history-aware scorer and found the best current `test_2018-04-13` operating point at:
+
+- sparse `top_count = 300`
+
+The resulting adaptive policy is:
+
+- sparse: `top_count = 300`
+- moderate: `top_count = 200`
+- dense: `window_median_plus_mad(k=20)`
+
+Using:
+
+- checkpoint: `artifacts/training_runs/rel_grouped_dot_30ep/best_model.pt`
+- score method: `top5_mean_log_support_floor128_file_history_file_only`
+- score calibration: `robust_zscore_by_type`
+- threshold policy: adaptive policy with sparse `top_count=300`
+
+we get:
+
+| Window | F1 | Precision | Recall |
+| --- | ---: | ---: | ---: |
+| `val` | `0.038278` | `0.020000` | `0.444444` |
+| `test_2018-04-12` | `0.690518` | `0.528191` | `0.996886` |
+| `test_2018-04-13` | `0.056962` | `0.030000` | `0.562500` |
+
+Important caveat:
+
+- the sparse `top_count=300` choice is a **post-hoc operating-point result**
+- it is useful for analysis and for reporting the current best achievable `F1`
+- but it is stricter to describe it as a post-hoc sweep result rather than a fully validation-selected threshold
 
 ## Current Status
 
@@ -172,10 +246,16 @@ The original training checkpoint is still the same:
 
 But the best node-level pipeline is no longer the old formal baseline.
 
-Current strongest candidate:
+There are now two useful "best" summaries:
 
-- scorer: `top5_mean_log_support_floor128_file + robust_zscore_by_type`
-- thresholding: adaptive threshold policy v1
+- strongest validation-compatible adaptive policy so far:
+  - scorer: `top5_mean_log_support_floor128_file_history_file_only + robust_zscore_by_type`
+  - thresholding: adaptive policy v1 with sparse `top_count=138`
+  - `test_2018-04-13 F1 = 0.051948`
+- strongest current post-hoc operating point:
+  - scorer: `top5_mean_log_support_floor128_file_history_file_only + robust_zscore_by_type`
+  - thresholding: adaptive policy with sparse `top_count=300`
+  - `test_2018-04-13 F1 = 0.056962`
 
 This is the first candidate that:
 
@@ -190,4 +270,4 @@ This is the first candidate that:
 - `gpu/compare_score_aggregations.py`
 - `gpu/compare_score_calibrations.py`
 - `gpu/compare_adaptive_threshold_policies.py`
-
+- `gpu/evaluate_checkpoint.py`
