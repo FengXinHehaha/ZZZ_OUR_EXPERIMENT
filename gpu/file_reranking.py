@@ -6,6 +6,8 @@ from analyze_file_false_positives import compute_selected_node_stats
 POST_RERANK_METHODS = (
     "none",
     "file_rerank_support",
+    "file_rerank_support_write",
+    "file_rerank_support_write_meta",
     "file_rerank_support_history",
 )
 
@@ -61,10 +63,20 @@ def build_candidate_feature_tables(
         str(row["node_uuid"]): float(node_stats.get(int(row["node_id"]), {}).get("incident_group_file_read", 0.0))
         for row in rows
     }
+    file_write_edges = {
+        str(row["node_uuid"]): float(node_stats.get(int(row["node_id"]), {}).get("incident_group_file_write", 0.0))
+        for row in rows
+    }
+    file_meta_edges = {
+        str(row["node_uuid"]): float(node_stats.get(int(row["node_id"]), {}).get("incident_group_file_meta", 0.0))
+        for row in rows
+    }
     return {
         "total_degree_pct": compute_percentile_lookup(total_degree),
         "unique_process_neighbors_pct": compute_percentile_lookup(unique_process_neighbors),
         "file_read_edges_pct": compute_percentile_lookup(file_read_edges),
+        "file_write_edges_pct": compute_percentile_lookup(file_write_edges),
+        "file_meta_edges_pct": compute_percentile_lookup(file_meta_edges),
     }
 
 
@@ -77,6 +89,40 @@ def score_support_bundle(
     proc_pct = feature_tables["unique_process_neighbors_pct"].get(uuid, 0.0)
     read_pct = feature_tables["file_read_edges_pct"].get(uuid, 0.0)
     boost = 1.0 + 0.25 * degree_pct + 0.45 * proc_pct + 0.15 * read_pct
+    return base_score * boost
+
+
+def score_support_write_bundle(
+    base_score: float,
+    uuid: str,
+    feature_tables: Dict[str, Dict[str, float]],
+) -> float:
+    degree_pct = feature_tables["total_degree_pct"].get(uuid, 0.0)
+    proc_pct = feature_tables["unique_process_neighbors_pct"].get(uuid, 0.0)
+    read_pct = feature_tables["file_read_edges_pct"].get(uuid, 0.0)
+    write_pct = feature_tables["file_write_edges_pct"].get(uuid, 0.0)
+    boost = 1.0 + 0.20 * degree_pct + 0.35 * proc_pct + 0.10 * read_pct + 0.25 * write_pct
+    return base_score * boost
+
+
+def score_support_write_meta_bundle(
+    base_score: float,
+    uuid: str,
+    feature_tables: Dict[str, Dict[str, float]],
+) -> float:
+    degree_pct = feature_tables["total_degree_pct"].get(uuid, 0.0)
+    proc_pct = feature_tables["unique_process_neighbors_pct"].get(uuid, 0.0)
+    read_pct = feature_tables["file_read_edges_pct"].get(uuid, 0.0)
+    write_pct = feature_tables["file_write_edges_pct"].get(uuid, 0.0)
+    meta_pct = feature_tables["file_meta_edges_pct"].get(uuid, 0.0)
+    boost = (
+        1.0
+        + 0.18 * degree_pct
+        + 0.30 * proc_pct
+        + 0.08 * read_pct
+        + 0.22 * write_pct
+        + 0.12 * meta_pct
+    )
     return base_score * boost
 
 
@@ -116,6 +162,10 @@ def rerank_scored_rows(
         target_row = row_by_uuid[uuid]
         if method_name == "file_rerank_support":
             new_score = score_support_bundle(base_score, uuid, feature_tables)
+        elif method_name == "file_rerank_support_write":
+            new_score = score_support_write_bundle(base_score, uuid, feature_tables)
+        elif method_name == "file_rerank_support_write_meta":
+            new_score = score_support_write_meta_bundle(base_score, uuid, feature_tables)
         elif method_name == "file_rerank_support_history":
             new_score = score_support_history_bundle(
                 base_score,
