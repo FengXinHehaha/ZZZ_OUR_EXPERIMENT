@@ -68,6 +68,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also write per-method node_scores.tsv files.",
     )
+    parser.add_argument(
+        "--history-reset-before-window",
+        action="append",
+        default=[],
+        help="Optional window name(s) before which carried history is cleared.",
+    )
     return parser.parse_args()
 
 
@@ -363,14 +369,18 @@ def main() -> None:
         "best_record": checkpoint.get("best_record"),
         "selection_metric": config.get("selection_metric"),
         "history_source_method": HISTORY_SOURCE_METHOD,
+        "history_reset_before_windows": list(args.history_reset_before_window),
         "topk": topk,
         "graphs": [],
     }
 
+    history_reset_before_windows = set(args.history_reset_before_window)
     previous_history_percentiles_by_uuid: Dict[str, float] | None = None
     for graph_path in graph_paths:
         graph_path = graph_path.resolve()
         window_name = graph_path.parent.name
+        if window_name in history_reset_before_windows:
+            previous_history_percentiles_by_uuid = None
         print(f"[compare-score-aggs] evaluating {window_name}", flush=True)
         summary, previous_history_percentiles_by_uuid = evaluate_single_graph(
             model=model,
