@@ -6,6 +6,8 @@ from pathlib import Path
 from statistics import median
 from typing import Callable, Dict, List, Tuple
 
+from file_screening import eligible_rows, eligible_scores, is_screen_kept
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EVAL_DIR = REPO_ROOT / "artifacts" / "evaluations" / "baseline_eval_60ep"
@@ -143,6 +145,7 @@ def read_node_scores(path: Path) -> List[Dict[str, float | int | str]]:
                     "node_type": row["node_type"],
                     "is_gt": int(row["is_gt"]),
                     "score": float(row["score"]),
+                    "screen_keep": int(row.get("screen_keep", 1) or 1),
                 }
             )
     return rows
@@ -280,7 +283,7 @@ def select_best_candidate(candidates: List[Dict[str, object]], optimize: str) ->
 def compute_confusion_threshold(rows: List[Dict[str, float | int | str]], threshold: float) -> Dict[str, float | int]:
     tp = fp = tn = fn = 0
     for row in rows:
-        pred_positive = float(row["score"]) >= threshold
+        pred_positive = is_screen_kept(row) and float(row["score"]) >= threshold
         is_positive = int(row["is_gt"]) == 1
         if pred_positive and is_positive:
             tp += 1
@@ -301,14 +304,21 @@ def scan_absolute_thresholds(
     optimize: str,
     top_n: int,
 ) -> Tuple[Dict[str, object], int, List[Dict[str, object]]]:
-    sorted_rows = sorted(rows, key=lambda row: float(row["score"]), reverse=True)
+    sorted_rows = sorted(eligible_rows(rows), key=lambda row: float(row["score"]), reverse=True)
     total_positive = sum(int(row["is_gt"]) for row in sorted_rows)
-    total_negative = len(sorted_rows) - total_positive
+    total_positive = sum(int(row["is_gt"]) for row in rows)
+    total_negative = len(rows) - total_positive
     tp = 0
     fp = 0
     best: Dict[str, object] | None = None
     best_candidates: List[Dict[str, object]] = []
     unique_thresholds = 0
+    if not sorted_rows:
+        candidate = {
+            "threshold": math.inf,
+            **metrics_from_counts(0, 0, total_negative, total_positive),
+        }
+        return candidate, 0, [candidate]
     index = 0
     while index < len(sorted_rows):
         score = float(sorted_rows[index]["score"])
@@ -340,12 +350,30 @@ def scan_absolute_thresholds(
 
 
 def compute_confusion_top_ratio(rows: List[Dict[str, float | int | str]], ratio: float) -> Dict[str, object]:
-    sorted_rows = sorted(rows, key=lambda row: float(row["score"]), reverse=True)
+    sorted_rows = sorted(eligible_rows(rows), key=lambda row: float(row["score"]), reverse=True)
+    if not sorted_rows:
+        total_positive = sum(int(row["is_gt"]) for row in rows)
+        total_negative = len(rows) - total_positive
+        return {
+            "ratio": 0.0,
+            "cutoff": 0,
+            "threshold": math.inf,
+            **metrics_from_counts(0, 0, total_negative, total_positive),
+        }
     cutoff = min(len(sorted_rows), max(1, math.ceil(len(sorted_rows) * ratio)))
-    tp = sum(int(row["is_gt"]) for row in sorted_rows[:cutoff])
-    fp = cutoff - tp
-    fn = sum(int(row["is_gt"]) for row in sorted_rows[cutoff:])
-    tn = len(sorted_rows) - cutoff - fn
+    selected_ids = {int(row["node_id"]) for row in sorted_rows[:cutoff]}
+    tp = fp = tn = fn = 0
+    for row in rows:
+        pred_positive = int(row["node_id"]) in selected_ids
+        is_positive = int(row["is_gt"]) == 1
+        if pred_positive and is_positive:
+            tp += 1
+        elif pred_positive and not is_positive:
+            fp += 1
+        elif (not pred_positive) and is_positive:
+            fn += 1
+        else:
+            tn += 1
     return {
         "ratio": ratio,
         "cutoff": cutoff,
@@ -355,12 +383,30 @@ def compute_confusion_top_ratio(rows: List[Dict[str, float | int | str]], ratio:
 
 
 def compute_confusion_top_count(rows: List[Dict[str, float | int | str]], count: int) -> Dict[str, object]:
-    sorted_rows = sorted(rows, key=lambda row: float(row["score"]), reverse=True)
+    sorted_rows = sorted(eligible_rows(rows), key=lambda row: float(row["score"]), reverse=True)
+    if not sorted_rows:
+        total_positive = sum(int(row["is_gt"]) for row in rows)
+        total_negative = len(rows) - total_positive
+        return {
+            "count": 0,
+            "ratio": 0.0,
+            "threshold": math.inf,
+            **metrics_from_counts(0, 0, total_negative, total_positive),
+        }
     cutoff = min(len(sorted_rows), max(1, count))
-    tp = sum(int(row["is_gt"]) for row in sorted_rows[:cutoff])
-    fp = cutoff - tp
-    fn = sum(int(row["is_gt"]) for row in sorted_rows[cutoff:])
-    tn = len(sorted_rows) - cutoff - fn
+    selected_ids = {int(row["node_id"]) for row in sorted_rows[:cutoff]}
+    tp = fp = tn = fn = 0
+    for row in rows:
+        pred_positive = int(row["node_id"]) in selected_ids
+        is_positive = int(row["is_gt"]) == 1
+        if pred_positive and is_positive:
+            tp += 1
+        elif pred_positive and not is_positive:
+            fp += 1
+        elif (not pred_positive) and is_positive:
+            fn += 1
+        else:
+            tn += 1
     return {
         "count": cutoff,
         "ratio": cutoff / len(sorted_rows) if sorted_rows else 0.0,
@@ -389,11 +435,11 @@ def robust_threshold_from_scores(scores: List[float], k: float) -> float:
 
 
 def mean_std_threshold(rows: List[Dict[str, float | int | str]], k: float) -> float:
-    return mean_std_threshold_from_scores([float(row["score"]) for row in rows], k)
+    return mean_std_threshold_from_scores(eligible_scores(rows), k)
 
 
 def robust_threshold(rows: List[Dict[str, float | int | str]], k: float) -> float:
-    return robust_threshold_from_scores([float(row["score"]) for row in rows], k)
+    return robust_threshold_from_scores(eligible_scores(rows), k)
 
 
 def summarize_typewise_thresholds(thresholds: Dict[str, float]) -> Dict[str, object]:
@@ -417,6 +463,8 @@ def typewise_thresholds(
 ) -> Dict[str, float]:
     scores_by_type: Dict[str, List[float]] = {}
     for row in rows:
+        if not is_screen_kept(row):
+            continue
         node_type = str(row["node_type"])
         scores_by_type.setdefault(node_type, []).append(float(row["score"]))
     return {
@@ -432,8 +480,8 @@ def compute_confusion_typewise_thresholds(
     tp = fp = tn = fn = 0
     for row in rows:
         node_type = str(row["node_type"])
-        threshold = thresholds[node_type]
-        pred_positive = float(row["score"]) >= threshold
+        threshold = thresholds.get(node_type, math.inf)
+        pred_positive = is_screen_kept(row) and float(row["score"]) >= threshold
         is_positive = int(row["is_gt"]) == 1
         if pred_positive and is_positive:
             tp += 1
@@ -740,6 +788,7 @@ def main() -> None:
         "checkpoint_epoch": summary["checkpoint_epoch"],
         "score_method": summary.get("score_method"),
         "score_calibration": summary.get("score_calibration"),
+        "file_screen_policy": summary.get("file_screen_policy"),
         "post_rerank_method": summary.get("post_rerank_method"),
         "post_rerank_candidate_rank_max": summary.get("post_rerank_candidate_rank_max"),
         "selection_window": args.select_window,
@@ -763,6 +812,8 @@ def main() -> None:
         print(f"[threshold-strategies] score_method={summary['score_method']}")
     if summary.get("score_calibration") is not None:
         print(f"[threshold-strategies] score_calibration={summary['score_calibration']}")
+    if summary.get("file_screen_policy") is not None:
+        print(f"[threshold-strategies] file_screen_policy={summary['file_screen_policy']}")
     if summary.get("post_rerank_method") is not None:
         print(
             f"[threshold-strategies] post_rerank_method={summary['post_rerank_method']} "

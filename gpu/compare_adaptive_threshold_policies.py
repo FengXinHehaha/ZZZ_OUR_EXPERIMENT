@@ -12,6 +12,7 @@ from compare_threshold_strategies import (
     read_node_scores,
     summarize_window,
 )
+from file_screening import eligible_rows
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -89,7 +90,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def count_scores_at_or_above(rows: List[Dict[str, float | int | str]], threshold: float) -> int:
-    return sum(1 for row in rows if float(row["score"]) >= threshold)
+    return sum(1 for row in eligible_rows(rows) if float(row["score"]) >= threshold)
 
 
 def classify_regime(
@@ -184,6 +185,7 @@ def main() -> None:
         "checkpoint_epoch": summary["checkpoint_epoch"],
         "score_method": summary.get("score_method"),
         "score_calibration": summary.get("score_calibration"),
+        "file_screen_policy": summary.get("file_screen_policy"),
         "post_rerank_method": summary.get("post_rerank_method"),
         "post_rerank_candidate_rank_max": summary.get("post_rerank_candidate_rank_max"),
         "policy_config": {
@@ -206,6 +208,8 @@ def main() -> None:
         print(f"[adaptive-threshold] score_method={summary['score_method']}", flush=True)
     if summary.get("score_calibration") is not None:
         print(f"[adaptive-threshold] score_calibration={summary['score_calibration']}", flush=True)
+    if summary.get("file_screen_policy") is not None:
+        print(f"[adaptive-threshold] file_screen_policy={summary['file_screen_policy']}", flush=True)
     if summary.get("post_rerank_method") is not None:
         print(
             f"[adaptive-threshold] post_rerank_method={summary['post_rerank_method']} "

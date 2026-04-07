@@ -7,6 +7,11 @@ from typing import Dict, List
 
 import torch
 
+from file_screening import (
+    DEFAULT_FILE_SCREEN_FEATURE_ROOT,
+    FILE_SCREEN_POLICIES,
+    apply_file_screen_policy,
+)
 from file_reranking import (
     POST_RERANK_METHODS,
     build_previous_file_percentiles,
@@ -89,6 +94,58 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=10000,
         help="Only rerank file nodes whose current rank is at most this cutoff. Default: 10000.",
+    )
+    parser.add_argument(
+        "--file-screen-policy",
+        type=str,
+        default="none",
+        choices=sorted(FILE_SCREEN_POLICIES),
+        help="Optional high-recall file screening policy applied before file reranking. Default: none.",
+    )
+    parser.add_argument(
+        "--file-screen-feature-root",
+        type=str,
+        default=str(DEFAULT_FILE_SCREEN_FEATURE_ROOT),
+        help=(
+            "Preferred feature root for file screening. The evaluator will fall back to "
+            "features_cleaned/features_model_ready automatically when needed."
+        ),
+    )
+    parser.add_argument(
+        "--file-screen-score-top-rank-max",
+        type=int,
+        default=10000,
+        help="File screening keeps files already ranked within this global top-k band. Default: 10000.",
+    )
+    parser.add_argument(
+        "--file-screen-min-unique-process-count",
+        type=float,
+        default=2.0,
+        help="File screening keeps files touched by at least this many unique processes. Default: 2.",
+    )
+    parser.add_argument(
+        "--file-screen-min-total-accesses",
+        type=float,
+        default=3.0,
+        help="File screening keeps files with at least this many accesses. Default: 3.",
+    )
+    parser.add_argument(
+        "--file-screen-min-behavior-count",
+        type=float,
+        default=1.0,
+        help="File screening keeps files with at least this many risky behavior events. Default: 1.",
+    )
+    parser.add_argument(
+        "--file-screen-min-network-active-process-count",
+        type=float,
+        default=1.0,
+        help="File screening keeps files touched by at least this many network-active processes. Default: 1.",
+    )
+    parser.add_argument(
+        "--file-screen-min-path-risk-count",
+        type=float,
+        default=1.0,
+        help="File screening keeps files whose risky path counter reaches this threshold. Default: 1.",
     )
     parser.add_argument(
         "--topk",
@@ -176,7 +233,16 @@ def evaluate_single_graph(
     relation_group_scheme: str,
     previous_history_percentiles_by_uuid: Dict[str, float] | None,
     previous_post_rerank_file_percentiles_by_uuid: Dict[str, float] | None,
-) -> tuple[Dict[str, object], Dict[str, float], Dict[str, float]]:
+    file_screen_policy: str,
+    file_screen_feature_root: Path,
+    file_screen_previous_file_uuids: set[str] | None,
+    file_screen_score_top_rank_max: int,
+    file_screen_min_unique_process_count: float,
+    file_screen_min_total_accesses: float,
+    file_screen_min_behavior_count: float,
+    file_screen_min_network_active_process_count: float,
+    file_screen_min_path_risk_count: float,
+) -> tuple[Dict[str, object], Dict[str, float], Dict[str, float], set[str]]:
     payload = prepare_graph_payload(
         graph_path,
         device=device,
@@ -257,6 +323,40 @@ def evaluate_single_graph(
     for rank, row in enumerate(scored_rows, start=1):
         row["rank"] = rank
 
+    file_screen_summary = {
+        "file_screen_policy": file_screen_policy,
+        "resolved_feature_root": None,
+        "path_rule_columns": [],
+        "total_file_nodes": sum(1 for row in scored_rows if str(row["node_type"]) == "file"),
+        "kept_file_nodes": sum(1 for row in scored_rows if str(row["node_type"]) == "file"),
+        "screened_out_file_nodes": 0,
+        "file_retention_ratio": 1.0,
+        "gt_file_total": sum(
+            1 for row in scored_rows if str(row["node_type"]) == "file" and int(row["is_gt"]) == 1
+        ),
+        "gt_file_kept": sum(
+            1 for row in scored_rows if str(row["node_type"]) == "file" and int(row["is_gt"]) == 1
+        ),
+        "gt_file_recall": 1.0,
+    }
+    next_file_screen_previous_file_uuids = file_screen_previous_file_uuids or set()
+    for row in scored_rows:
+        row["screen_keep"] = 1
+    if file_screen_policy != "none":
+        scored_rows, file_screen_summary, next_file_screen_previous_file_uuids = apply_file_screen_policy(
+            rows=scored_rows,
+            feature_root=file_screen_feature_root,
+            window_name=payload["name"],
+            policy_name=file_screen_policy,
+            previous_file_uuids=file_screen_previous_file_uuids,
+            score_top_rank_max=file_screen_score_top_rank_max,
+            min_unique_process_count=file_screen_min_unique_process_count,
+            min_total_accesses=file_screen_min_total_accesses,
+            min_behavior_count=file_screen_min_behavior_count,
+            min_network_active_process_count=file_screen_min_network_active_process_count,
+            min_path_risk_count=file_screen_min_path_risk_count,
+        )
+
     next_post_rerank_file_percentiles_by_uuid = build_previous_file_percentiles(scored_rows)
     if post_rerank_method != "none":
         scored_rows = rerank_scored_rows_for_graph(
@@ -278,7 +378,7 @@ def evaluate_single_graph(
     with node_scores_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["rank", "node_id", "node_uuid", "node_type", "is_gt", "score"],
+            fieldnames=["rank", "node_id", "node_uuid", "node_type", "is_gt", "score", "screen_keep"],
             delimiter="\t",
         )
         writer.writeheader()
@@ -303,6 +403,8 @@ def evaluate_single_graph(
         },
         "score_method": score_method,
         "score_calibration": score_calibration,
+        "file_screen_policy": file_screen_policy,
+        "file_screen_summary": file_screen_summary,
         "post_rerank_method": post_rerank_method,
         "post_rerank_candidate_rank_max": post_rerank_candidate_rank_max,
         "topk": topk_summary,
@@ -312,7 +414,12 @@ def evaluate_single_graph(
     with (window_output_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2)
 
-    return summary, next_history_percentiles_by_uuid, next_post_rerank_file_percentiles_by_uuid
+    return (
+        summary,
+        next_history_percentiles_by_uuid,
+        next_post_rerank_file_percentiles_by_uuid,
+        next_file_screen_previous_file_uuids,
+    )
 
 
 def main() -> None:
@@ -366,6 +473,16 @@ def main() -> None:
         "selection_metric": config.get("selection_metric"),
         "score_method": args.score_method,
         "score_calibration": args.score_calibration,
+        "file_screen_policy": args.file_screen_policy,
+        "file_screen_feature_root": str(Path(args.file_screen_feature_root).expanduser().resolve()),
+        "file_screen_config": {
+            "score_top_rank_max": args.file_screen_score_top_rank_max,
+            "min_unique_process_count": args.file_screen_min_unique_process_count,
+            "min_total_accesses": args.file_screen_min_total_accesses,
+            "min_behavior_count": args.file_screen_min_behavior_count,
+            "min_network_active_process_count": args.file_screen_min_network_active_process_count,
+            "min_path_risk_count": args.file_screen_min_path_risk_count,
+        },
         "post_rerank_method": args.post_rerank_method,
         "post_rerank_candidate_rank_max": args.post_rerank_candidate_rank_max,
         "history_source_method": HISTORY_SOURCE_METHOD,
@@ -376,14 +493,21 @@ def main() -> None:
     history_reset_before_windows = set(args.history_reset_before_window)
     previous_history_percentiles_by_uuid: Dict[str, float] | None = None
     previous_post_rerank_file_percentiles_by_uuid: Dict[str, float] | None = None
+    previous_file_screen_file_uuids: set[str] | None = None
     for graph_path in graph_paths:
         graph_path = graph_path.resolve()
         window_name = graph_path.parent.name
         if window_name in history_reset_before_windows:
             previous_history_percentiles_by_uuid = None
             previous_post_rerank_file_percentiles_by_uuid = None
+            previous_file_screen_file_uuids = None
         print(f"[eval-checkpoint] evaluating {window_name}", flush=True)
-        summary, previous_history_percentiles_by_uuid, previous_post_rerank_file_percentiles_by_uuid = evaluate_single_graph(
+        (
+            summary,
+            previous_history_percentiles_by_uuid,
+            previous_post_rerank_file_percentiles_by_uuid,
+            previous_file_screen_file_uuids,
+        ) = evaluate_single_graph(
             model=model,
             graph_path=graph_path,
             device=device,
@@ -398,6 +522,15 @@ def main() -> None:
             relation_group_scheme=relation_group_scheme,
             previous_history_percentiles_by_uuid=previous_history_percentiles_by_uuid,
             previous_post_rerank_file_percentiles_by_uuid=previous_post_rerank_file_percentiles_by_uuid,
+            file_screen_policy=args.file_screen_policy,
+            file_screen_feature_root=Path(args.file_screen_feature_root).expanduser().resolve(),
+            file_screen_previous_file_uuids=previous_file_screen_file_uuids,
+            file_screen_score_top_rank_max=args.file_screen_score_top_rank_max,
+            file_screen_min_unique_process_count=args.file_screen_min_unique_process_count,
+            file_screen_min_total_accesses=args.file_screen_min_total_accesses,
+            file_screen_min_behavior_count=args.file_screen_min_behavior_count,
+            file_screen_min_network_active_process_count=args.file_screen_min_network_active_process_count,
+            file_screen_min_path_risk_count=args.file_screen_min_path_risk_count,
         )
         aggregate["graphs"].append(summary)
         print(
@@ -405,6 +538,7 @@ def main() -> None:
             f"roc_auc={summary['roc_auc']} ap={summary['average_precision']} "
             f"score_method={summary['score_method']} "
             f"score_calibration={summary['score_calibration']} "
+            f"file_screen_policy={summary['file_screen_policy']} "
             f"post_rerank_method={summary['post_rerank_method']} "
             f"edge_loss={summary['edge_loss']:.6f}",
             flush=True,
