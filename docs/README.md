@@ -17,3 +17,4 @@ Implemented notes:
 - `gpu_baseline_summary.md` records the current GPU baseline conclusions, ablations, and recommended next directions
 - `file_node_analysis_summary.md` records the current file-node error analysis, support-aware scorer, and adaptive threshold policy
 - `paper_result_tables.md` reformats the current baseline and best-candidate results into paper-facing comparison tables
+- `file_feature_v2_screening_plan.md` records the current file feature redesign direction and the first high-recall file screening policy
