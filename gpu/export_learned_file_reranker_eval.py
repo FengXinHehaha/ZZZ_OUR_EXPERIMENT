@@ -12,7 +12,10 @@ from analyze_file_false_positives import (
 )
 from compare_learned_file_rerankers import (
     DEFAULT_FEATURE_NAMES,
+    DEFAULT_SUBWINDOW_FEATURE_ROOT,
     LEARNED_METHOD_NAME,
+    LEARNED_SUBWINDOW_METHOD_NAME,
+    SUBWINDOW_AUGMENTED_FEATURE_NAMES,
     build_learned_feature_rows,
     ensure_dir,
     rerank_rows_with_learned_model,
@@ -54,6 +57,19 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=str(DEFAULT_FEATURE_ROOT),
         help=f"Feature root for learned reranker features. Default: {DEFAULT_FEATURE_ROOT}",
+    )
+    parser.add_argument(
+        "--subwindow-feature-root",
+        type=str,
+        default=str(DEFAULT_SUBWINDOW_FEATURE_ROOT),
+        help=f"Optional subwindow feature root. Default: {DEFAULT_SUBWINDOW_FEATURE_ROOT}",
+    )
+    parser.add_argument(
+        "--learned-feature-set",
+        type=str,
+        choices=("default", "subwindow2h"),
+        default="default",
+        help="Which learned feature set to export. Default: default",
     )
     parser.add_argument(
         "--select-window",
@@ -124,6 +140,7 @@ def main() -> None:
     eval_dir = Path(args.eval_dir).expanduser().resolve()
     graph_root = Path(args.graph_root).expanduser().resolve()
     feature_root = Path(args.feature_root).expanduser().resolve()
+    subwindow_feature_root = Path(args.subwindow_feature_root).expanduser().resolve()
 
     summary = load_json(eval_dir / "evaluation_summary.json")
     graph_summaries = list(summary["graphs"])
@@ -155,12 +172,13 @@ def main() -> None:
             selected_node_ids=[int(row["node_id"]) for row in candidate_rows],
             relation_group_scheme=args.relation_group_scheme,
         )
-        feature_rows, _, _ = build_learned_feature_rows(
+        feature_rows, _, _, _ = build_learned_feature_rows(
             candidate_rows=candidate_rows,
             node_stats=node_stats,
             previous_file_percentiles_by_uuid=previous_file_percentiles_by_uuid,
             graph_path=graph_path,
             feature_root=feature_root,
+            subwindow_feature_root=subwindow_feature_root,
         )
         window_contexts.append(
             {
@@ -177,10 +195,21 @@ def main() -> None:
     if select_context is None:
         raise ValueError(f"Select window not found in eval dir: {args.select_window}")
 
+    chosen_feature_names = (
+        DEFAULT_FEATURE_NAMES
+        if args.learned_feature_set == "default"
+        else SUBWINDOW_AUGMENTED_FEATURE_NAMES
+    )
+    chosen_method_name = (
+        LEARNED_METHOD_NAME
+        if args.learned_feature_set == "default"
+        else LEARNED_SUBWINDOW_METHOD_NAME
+    )
+
     x_train, y_train = tensorize_training_rows(
         select_context["candidate_rows"],
         select_context["feature_rows"],
-        DEFAULT_FEATURE_NAMES,
+        chosen_feature_names,
     )
     if int(y_train.sum().item()) <= 0:
         raise ValueError(
@@ -190,7 +219,7 @@ def main() -> None:
     learned_state = train_learned_linear_reranker(
         x=x_train,
         y=y_train,
-        feature_names=DEFAULT_FEATURE_NAMES,
+        feature_names=chosen_feature_names,
         train_steps=args.train_steps,
         lr=args.lr,
         weight_decay=args.weight_decay,
@@ -203,20 +232,24 @@ def main() -> None:
         "selection_metric": summary.get("selection_metric"),
         "score_method": summary.get("score_method"),
         "score_calibration": summary.get("score_calibration"),
-        "post_rerank_method": LEARNED_METHOD_NAME,
+        "post_rerank_method": chosen_method_name,
         "post_rerank_candidate_rank_max": args.candidate_rank_max,
         "post_rerank_feature_root": str(feature_root),
+        "post_rerank_subwindow_feature_root": str(subwindow_feature_root),
         "history_source_method": summary.get("history_source_method"),
         "history_reset_before_windows": list(args.history_reset_before_window),
         "select_window": args.select_window,
+        "learned_feature_set": args.learned_feature_set,
         "learned_state": learned_state,
         "graphs": [],
     }
 
     print(f"[export-learned-file-reranker] base_eval_dir={eval_dir}", flush=True)
     print(f"[export-learned-file-reranker] feature_root={feature_root}", flush=True)
+    print(f"[export-learned-file-reranker] subwindow_feature_root={subwindow_feature_root}", flush=True)
     print(f"[export-learned-file-reranker] select_window={args.select_window}", flush=True)
     print(f"[export-learned-file-reranker] candidate_rank_max={args.candidate_rank_max}", flush=True)
+    print(f"[export-learned-file-reranker] learned_feature_set={args.learned_feature_set}", flush=True)
     print(f"[export-learned-file-reranker] learned_state={learned_state}", flush=True)
 
     for context in window_contexts:
@@ -243,9 +276,11 @@ def main() -> None:
                 "edge_loss": graph_summary.get("edge_loss"),
                 "score_method": graph_summary.get("score_method", summary.get("score_method")),
                 "score_calibration": graph_summary.get("score_calibration", summary.get("score_calibration")),
-                "post_rerank_method": LEARNED_METHOD_NAME,
+                "post_rerank_method": chosen_method_name,
                 "post_rerank_candidate_rank_max": args.candidate_rank_max,
                 "post_rerank_feature_root": str(feature_root),
+                "post_rerank_subwindow_feature_root": str(subwindow_feature_root),
+                "learned_feature_set": args.learned_feature_set,
             }
         )
         with (window_output_dir / "summary.json").open("w", encoding="utf-8") as handle:

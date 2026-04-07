@@ -22,6 +22,15 @@ PATH_RISK_COLUMNS = (
     "script_path_count",
     "system_bin_path_count",
 )
+SUBWINDOW_FEATURE_COLUMNS = (
+    "active_subwindow_count",
+    "max_subwindow_ratio",
+    "max_subwindow_accesses",
+    "peak_subwindow_unique_process_count",
+    "peak_subwindow_write_count",
+    "peak_subwindow_execute_count",
+    "risky_path_active_subwindow_count",
+)
 
 
 def compute_percentile_lookup(values_by_key: Dict[str, float]) -> Dict[str, float]:
@@ -211,6 +220,38 @@ def build_candidate_feature_tables(
         "file_read_edges_pct": compute_percentile_lookup(file_read_edges),
         "file_write_edges_pct": compute_percentile_lookup(file_write_edges),
         "file_meta_edges_pct": compute_percentile_lookup(file_meta_edges),
+    }
+
+
+def build_candidate_subwindow_feature_tables(
+    rows: List[Dict[str, object]],
+    graph_path: Path,
+    subwindow_feature_root: Path | str | None = None,
+) -> Dict[str, Dict[str, float]]:
+    candidate_uuids = {str(row["node_uuid"]) for row in rows}
+    empty = {
+        f"{column}_pct": {}
+        for column in SUBWINDOW_FEATURE_COLUMNS
+    }
+    if not candidate_uuids or not subwindow_feature_root:
+        return empty
+
+    root = Path(subwindow_feature_root).expanduser().resolve()
+    window_dir = root / graph_path.parent.name
+    feature_path = window_dir / "file_subwindow__file_node.tsv"
+    if not feature_path.exists():
+        return empty
+
+    subwindow_rows = load_feature_rows_by_uuid(feature_path, candidate_uuids)
+    values_by_column: Dict[str, Dict[str, float]] = {column: {} for column in SUBWINDOW_FEATURE_COLUMNS}
+    for uuid in candidate_uuids:
+        row = subwindow_rows.get(uuid, {})
+        for column in SUBWINDOW_FEATURE_COLUMNS:
+            values_by_column[column][uuid] = to_float(row.get(column))
+
+    return {
+        f"{column}_pct": compute_percentile_lookup(values_by_column[column])
+        for column in SUBWINDOW_FEATURE_COLUMNS
     }
 
 

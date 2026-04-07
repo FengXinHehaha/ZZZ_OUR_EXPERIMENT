@@ -18,6 +18,7 @@ from analyze_file_false_positives import (
 from file_reranking import (
     build_candidate_feature_tables,
     build_candidate_path_feature_tables,
+    build_candidate_subwindow_feature_tables,
     build_previous_file_percentiles,
     candidate_file_rows,
     clone_rows,
@@ -31,7 +32,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EVAL_DIR = REPO_ROOT / "artifacts" / "evaluations" / "rel_grouped_dot_30ep_history_file_only_eval"
 DEFAULT_GRAPH_ROOT = REPO_ROOT / "artifacts" / "graphs"
 DEFAULT_FEATURE_ROOT = REPO_ROOT / "artifacts" / "features_model_ready_hybrid_file_v2"
+DEFAULT_SUBWINDOW_FEATURE_ROOT = REPO_ROOT / "artifacts" / "features_file_subwindow_2h"
 LEARNED_METHOD_NAME = "file_rerank_learned_linear"
+LEARNED_SUBWINDOW_METHOD_NAME = "file_rerank_learned_linear_subwindow2h"
 DEFAULT_FEATURE_NAMES = (
     "base_score_pct",
     "total_degree_pct",
@@ -41,6 +44,14 @@ DEFAULT_FEATURE_NAMES = (
     "known_path_count_pct",
     "risky_path_count_pct",
 )
+SUBWINDOW_FEATURE_NAMES = (
+    "active_subwindow_count_pct",
+    "max_subwindow_accesses_pct",
+    "peak_subwindow_unique_process_count_pct",
+    "peak_subwindow_write_count_pct",
+    "risky_path_active_subwindow_count_pct",
+)
+SUBWINDOW_AUGMENTED_FEATURE_NAMES = DEFAULT_FEATURE_NAMES + SUBWINDOW_FEATURE_NAMES
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,6 +80,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Feature root containing <window>/file_view__file_node.tsv and "
             f"process_view__file_node.tsv. Default: {DEFAULT_FEATURE_ROOT}"
+        ),
+    )
+    parser.add_argument(
+        "--subwindow-feature-root",
+        type=str,
+        default=str(DEFAULT_SUBWINDOW_FEATURE_ROOT),
+        help=(
+            "Optional subwindow feature root containing <window>/file_subwindow__file_node.tsv. "
+            f"Default: {DEFAULT_SUBWINDOW_FEATURE_ROOT}"
         ),
     )
     parser.add_argument(
@@ -251,9 +271,20 @@ def build_learned_feature_rows(
     previous_file_percentiles_by_uuid: Dict[str, float],
     graph_path: Path,
     feature_root: Path,
-) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
+    subwindow_feature_root: Path | str | None,
+) -> Tuple[
+    Dict[str, Dict[str, float]],
+    Dict[str, Dict[str, float]],
+    Dict[str, Dict[str, float]],
+    Dict[str, Dict[str, float]],
+]:
     support_tables = build_candidate_feature_tables(candidate_rows, node_stats)
     path_tables = build_candidate_path_feature_tables(candidate_rows, graph_path, feature_root)
+    subwindow_tables = build_candidate_subwindow_feature_tables(
+        candidate_rows,
+        graph_path,
+        subwindow_feature_root,
+    )
     base_score_lookup = {str(row["node_uuid"]): float(row["score"]) for row in candidate_rows}
     base_score_pct = compute_percentile_lookup(base_score_lookup)
 
@@ -268,8 +299,17 @@ def build_learned_feature_rows(
             "history_pct": previous_file_percentiles_by_uuid.get(uuid, 0.0),
             "known_path_count_pct": path_tables["known_path_count_pct"].get(uuid, 0.0),
             "risky_path_count_pct": path_tables["risky_path_count_pct"].get(uuid, 0.0),
+            "active_subwindow_count_pct": subwindow_tables["active_subwindow_count_pct"].get(uuid, 0.0),
+            "max_subwindow_accesses_pct": subwindow_tables["max_subwindow_accesses_pct"].get(uuid, 0.0),
+            "peak_subwindow_unique_process_count_pct": subwindow_tables[
+                "peak_subwindow_unique_process_count_pct"
+            ].get(uuid, 0.0),
+            "peak_subwindow_write_count_pct": subwindow_tables["peak_subwindow_write_count_pct"].get(uuid, 0.0),
+            "risky_path_active_subwindow_count_pct": subwindow_tables[
+                "risky_path_active_subwindow_count_pct"
+            ].get(uuid, 0.0),
         }
-    return feature_rows, support_tables, path_tables
+    return feature_rows, support_tables, path_tables, subwindow_tables
 
 
 def tensorize_training_rows(
@@ -374,6 +414,7 @@ def main() -> None:
     eval_dir = Path(args.eval_dir).expanduser().resolve()
     graph_root = Path(args.graph_root).expanduser().resolve()
     feature_root = Path(args.feature_root).expanduser().resolve()
+    subwindow_feature_root = Path(args.subwindow_feature_root).expanduser().resolve()
 
     summary = load_json(eval_dir / "evaluation_summary.json")
     graph_summaries = list(summary["graphs"])
@@ -387,7 +428,13 @@ def main() -> None:
 
     topk = args.topk or [100, 500, 1000, 5000, 10000]
     history_reset_before_windows = set(args.history_reset_before_window)
-    methods = ["base_score", "file_rerank_support", "file_rerank_support_path", LEARNED_METHOD_NAME]
+    methods = [
+        "base_score",
+        "file_rerank_support",
+        "file_rerank_support_path",
+        LEARNED_METHOD_NAME,
+        LEARNED_SUBWINDOW_METHOD_NAME,
+    ]
 
     window_contexts: List[Dict[str, object]] = []
     previous_file_percentiles_by_uuid: Dict[str, float] = {}
@@ -404,12 +451,13 @@ def main() -> None:
             selected_node_ids=[int(row["node_id"]) for row in candidate_rows],
             relation_group_scheme=args.relation_group_scheme,
         )
-        feature_rows, support_tables, path_tables = build_learned_feature_rows(
+        feature_rows, support_tables, path_tables, subwindow_tables = build_learned_feature_rows(
             candidate_rows=candidate_rows,
             node_stats=node_stats,
             previous_file_percentiles_by_uuid=previous_file_percentiles_by_uuid,
             graph_path=graph_path,
             feature_root=feature_root,
+            subwindow_feature_root=subwindow_feature_root,
         )
         window_contexts.append(
             {
@@ -421,6 +469,7 @@ def main() -> None:
                 "node_stats": node_stats,
                 "support_tables": support_tables,
                 "path_tables": path_tables,
+                "subwindow_tables": subwindow_tables,
                 "feature_rows": feature_rows,
                 "previous_file_percentiles_by_uuid": dict(previous_file_percentiles_by_uuid),
             }
@@ -449,6 +498,19 @@ def main() -> None:
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
+    x_train_subwindow, y_train_subwindow = tensorize_training_rows(
+        select_context["candidate_rows"],
+        select_context["feature_rows"],
+        SUBWINDOW_AUGMENTED_FEATURE_NAMES,
+    )
+    learned_subwindow_state = train_learned_linear_reranker(
+        x=x_train_subwindow,
+        y=y_train_subwindow,
+        feature_names=SUBWINDOW_AUGMENTED_FEATURE_NAMES,
+        train_steps=args.train_steps,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
 
     results = {
         "eval_dir": str(eval_dir),
@@ -462,17 +524,21 @@ def main() -> None:
         "history_reset_before_windows": list(args.history_reset_before_window),
         "relation_group_scheme": args.relation_group_scheme,
         "feature_root": str(feature_root),
+        "subwindow_feature_root": str(subwindow_feature_root),
         "methods": methods,
         "topk": topk,
         "learned_state": learned_state,
+        "learned_subwindow_state": learned_subwindow_state,
         "graphs": [],
     }
 
     print(f"[compare-learned-file-rerankers] eval_dir={eval_dir}", flush=True)
     print(f"[compare-learned-file-rerankers] feature_root={feature_root}", flush=True)
+    print(f"[compare-learned-file-rerankers] subwindow_feature_root={subwindow_feature_root}", flush=True)
     print(f"[compare-learned-file-rerankers] select_window={args.select_window}", flush=True)
     print(f"[compare-learned-file-rerankers] candidate_rank_max={args.candidate_rank_max}", flush=True)
     print(f"[compare-learned-file-rerankers] learned_state={learned_state}", flush=True)
+    print(f"[compare-learned-file-rerankers] learned_subwindow_state={learned_subwindow_state}", flush=True)
 
     for context in window_contexts:
         graph_summary = context["graph_summary"]
@@ -510,6 +576,12 @@ def main() -> None:
                 candidate_rows=candidate_rows,
                 feature_rows=feature_rows,
                 learned_state=learned_state,
+            ),
+            LEARNED_SUBWINDOW_METHOD_NAME: rerank_rows_with_learned_model(
+                rows=base_rows,
+                candidate_rows=candidate_rows,
+                feature_rows=feature_rows,
+                learned_state=learned_subwindow_state,
             ),
         }
 
