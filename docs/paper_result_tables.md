@@ -16,6 +16,7 @@ The difference is entirely in node scoring and threshold policy.
 | Original baseline | `top5_mean + robust_zscore_by_type` | single `window_median_plus_mad (k=20)` | `0.000526` | `0.001157` | `0.526408` | `0.690518` | `0.001024` | `0.002393` |
 | Support-aware adaptive candidate | `top5_mean_log_support_floor128_file + robust_zscore_by_type` | adaptive policy v1 (`sparse=138`) | `0.013576` | `0.038278` | `0.526376` | `0.690518` | `0.011643` | `0.051948` |
 | History-aware current best operating point | `top5_mean_log_support_floor128_file_history_file_only + robust_zscore_by_type` | adaptive policy (`sparse=300`, post-hoc) | `0.013576` | `0.038278` | `0.526376` | `0.690518` | `0.016470` | `0.056962` |
+| Learned-reranker current best observed result | `top5_mean_log_support_floor128_file_history_file_only + robust_zscore_by_type + file_rerank_learned_linear` | adaptive policy (`sparse=250`, candidate max `2000`, post-hoc) | `0.030334` | `0.038278` | `0.526390` | `0.690518` | `0.023266` | `0.075188` |
 
 ## Table 2. Ranking Improvement On `test_2018-04-13`
 
@@ -24,6 +25,7 @@ The difference is entirely in node scoring and threshold policy.
 | Original baseline | `2587` | `0` | `4` | `11` | `0.001024` |
 | Support-aware candidate | `95` | `10` | `10` | `12` | `0.011643` |
 | History-aware scorer | `93` | `10` | `10` | `12` | `0.016470` |
+| Learned file reranker | `52` | `10` | `10` | `12` | `0.023266` |
 
 ## Table 3. Adaptive Threshold Policy V1
 
@@ -57,6 +59,38 @@ The difference is entirely in node scoring and threshold policy.
 | `300` | `0.030000` | `0.562500` | `0.056962` | `300` |
 | `500` | `0.020000` | `0.625000` | `0.038760` | `500` |
 
+## Table 6. Sparse-Window Sweep On `test_2018-04-13` For The Learned File Reranker
+
+Setup:
+
+- scorer: `top5_mean_log_support_floor128_file_history_file_only + robust_zscore_by_type`
+- second-stage reranker: `file_rerank_learned_linear`
+- candidate rank max: `2000`
+
+| sparse `top_count` | Precision | Recall | F1 | predicted positives |
+| ---: | ---: | ---: | ---: | ---: |
+| `150` | `0.026667` | `0.250000` | `0.048193` | `150` |
+| `200` | `0.025000` | `0.312500` | `0.046296` | `200` |
+| `250` | `0.040000` | `0.625000` | `0.075188` | `250` |
+| `300` | `0.033333` | `0.625000` | `0.063291` | `300` |
+| `350` | `0.028571` | `0.625000` | `0.054645` | `350` |
+| `400` | `0.025000` | `0.625000` | `0.048077` | `400` |
+| `500` | `0.020000` | `0.625000` | `0.038760` | `500` |
+
+## Table 7. Candidate-Rank-Max Sweep For The Learned File Reranker
+
+Setup:
+
+- sparse `top_count = 250`
+- select window: `val`
+
+| candidate rank max | `val` F1 | `test_2018-04-12` F1 | `test_2018-04-13` F1 | `test_2018-04-13` Precision | `test_2018-04-13` Recall |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| `1000` | `0.066986` | `0.690518` | `0.075188` | `0.040000` | `0.625000` |
+| `2000` | `0.038278` | `0.690518` | `0.075188` | `0.040000` | `0.625000` |
+| `5000` | `0.038278` | `0.690518` | `0.075188` | `0.040000` | `0.625000` |
+| `10000` | `0.038278` | `0.690518` | `0.060150` | `0.032000` | `0.500000` |
+
 ## Short Paper Claim
 
 The current strongest line keeps the original training checkpoint fixed and only changes node-level post-processing.
@@ -64,8 +98,12 @@ The current strongest line keeps the original training checkpoint fixed and only
 Under this setting:
 
 - `test_2018-04-12` remains essentially unchanged in AP/F1
-- `test_2018-04-13` improves from `AP 0.001024 / F1 0.002393` to `AP 0.016470 / F1 0.056962`
-- `test_2018-04-13` best GT rank improves from `2587` to `93`
+- `test_2018-04-13` improves from `AP 0.001024 / F1 0.002393` to `AP 0.023266 / F1 0.075188`
+- `test_2018-04-13` best GT rank improves from `2587` to `52`
 - `test_2018-04-13` top-1000 GT hits improve from `0` to `10`
 
-For strict reporting, it is important to note that the `sparse=300` operating point is a post-hoc sparse-window sweep result rather than a fully validation-selected threshold.
+For strict reporting, it is important to note that:
+
+- the learned file reranker is currently the strongest observed post-processing line
+- the `sparse=250` operating point is a post-hoc sparse-window sweep result rather than a fully validation-selected threshold
+- `candidate_rank_max=2000` is a conservative operating point; `1000/2000/5000` tie on `test_2018-04-13` F1, while `10000` degrades

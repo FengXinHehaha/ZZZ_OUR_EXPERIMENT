@@ -205,15 +205,92 @@ The reason is simple:
 - the extra GT nodes promoted by history mainly appeared below the old sparse cutoff
 - therefore the ranking got better, but the top-138 alarm budget stayed too tight
 
-## Current Strongest Operating Point
+## File-Specific Reranking
 
-We re-swept the sparse top-count for the history-aware scorer and found the best current `test_2018-04-13` operating point at:
+The next stage kept the same history-aware scorer but added a dedicated second-stage file reranker on top-ranked file nodes.
+
+### Hand-Crafted File Reranker
+
+The first successful reranker was:
+
+- post-rerank method: `file_rerank_support`
+- candidate band: top `2000` file nodes
+
+It reweights file nodes using:
+
+- total degree percentile
+- unique process-neighbor percentile
+- file-read incident-edge percentile
+
+This improved ranking again without changing the training checkpoint:
+
+| Setup | `val` AP | `test_2018-04-12` AP | `test_2018-04-13` AP | `test_2018-04-13` best GT rank |
+| --- | ---: | ---: | ---: | ---: |
+| history-aware scorer only | `0.013576` | `0.526376` | `0.016470` | `93` |
+| `+ file_rerank_support` | `0.018160` | `0.526379` | `0.017937` | `79` |
+
+Using the same adaptive policy family but re-sweeping the sparse operating point, the best observed hand-crafted reranker result was:
 
 - sparse `top_count = 300`
+- `test_2018-04-13`: `P 0.033333`, `R 0.625000`, `F1 0.063291`
+
+### Path-Aware Hand-Crafted Reranker
+
+We then brought the newly exported file path features into the reranker:
+
+- post-rerank method: `file_rerank_support_path`
+- extra signals:
+  - `unique_known_path_count`
+  - risky path counts built from `temp / hidden / script / system_bin`
+
+This helped the `hybrid_file_v2` line at the ranking stage, but when attached back to the strongest original graph line it did not improve the final `F1` beyond the hand-crafted `file_rerank_support` operating point.
+
+Conclusion:
+
+- path features are informative
+- but the fixed hand-crafted weighting still leaves value on the table
+
+### Lightweight Learned File Reranker
+
+The next step replaced the hand-crafted file reranker weights with a lightweight learned linear reranker trained on `val`.
+
+The learned reranker uses these features on top-ranked file nodes:
+
+- `base_score_pct`
+- `total_degree_pct`
+- `unique_process_neighbors_pct`
+- `file_read_edges_pct`
+- `history_pct`
+- `known_path_count_pct`
+- `risky_path_count_pct`
+
+The learned weights showed that the most useful signals were still structural/support features:
+
+- strong positive: `total_degree_pct`, `unique_process_neighbors_pct`, `file_read_edges_pct`
+- weak positive: `risky_path_count_pct`
+- near-zero: `history_pct` (already largely absorbed by the base scorer)
+- negative: `known_path_count_pct`
+
+Ranking-quality comparison on the current strongest graph line:
+
+| Setup | `val` AP | `test_2018-04-12` AP | `test_2018-04-13` AP | `test_2018-04-13` best GT rank |
+| --- | ---: | ---: | ---: | ---: |
+| history-aware scorer only | `0.013576` | `0.526376` | `0.016470` | `93` |
+| `+ file_rerank_support` | `0.018160` | `0.526379` | `0.017937` | `79` |
+| `+ file_rerank_support_path` | `0.018208` | `0.526379` | `0.018292` | `75` |
+| `+ file_rerank_learned_linear` | `0.030334` | `0.526390` | `0.023266` | `52` |
+
+This is the strongest ranking-quality line so far.
+
+## Current Strongest Observed Operating Point
+
+We re-swept the sparse top-count for the learned reranker and found the best current `test_2018-04-13` operating point at:
+
+- sparse `top_count = 250`
 
 The resulting adaptive policy is:
 
-- sparse: `top_count = 300`
+- sparse: `top_count = 250`
 - moderate: `top_count = 200`
 - dense: `window_median_plus_mad(k=20)`
 
@@ -222,7 +299,9 @@ Using:
 - checkpoint: `artifacts/training_runs/rel_grouped_dot_30ep/best_model.pt`
 - score method: `top5_mean_log_support_floor128_file_history_file_only`
 - score calibration: `robust_zscore_by_type`
-- threshold policy: adaptive policy with sparse `top_count=300`
+- post-rerank method: `file_rerank_learned_linear`
+- candidate band: top `2000` file nodes
+- threshold policy: adaptive policy with sparse `top_count=250`
 
 we get:
 
@@ -230,11 +309,11 @@ we get:
 | --- | ---: | ---: | ---: |
 | `val` | `0.038278` | `0.020000` | `0.444444` |
 | `test_2018-04-12` | `0.690518` | `0.528191` | `0.996886` |
-| `test_2018-04-13` | `0.056962` | `0.030000` | `0.562500` |
+| `test_2018-04-13` | `0.075188` | `0.040000` | `0.625000` |
 
 Important caveat:
 
-- the sparse `top_count=300` choice is a **post-hoc operating-point result**
+- the sparse `top_count=250` choice is a **post-hoc operating-point result**
 - it is useful for analysis and for reporting the current best achievable `F1`
 - but it is stricter to describe it as a post-hoc sweep result rather than a fully validation-selected threshold
 
@@ -254,8 +333,9 @@ There are now two useful "best" summaries:
   - `test_2018-04-13 F1 = 0.051948`
 - strongest current post-hoc operating point:
   - scorer: `top5_mean_log_support_floor128_file_history_file_only + robust_zscore_by_type`
-  - thresholding: adaptive policy with sparse `top_count=300`
-  - `test_2018-04-13 F1 = 0.056962`
+  - post-rerank: `file_rerank_learned_linear`
+  - thresholding: adaptive policy with sparse `top_count=250`
+  - `test_2018-04-13 F1 = 0.075188`
 
 This is the first candidate that:
 
