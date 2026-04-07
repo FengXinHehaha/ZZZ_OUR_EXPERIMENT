@@ -54,6 +54,15 @@ def parse_args() -> argparse.Namespace:
         help="Optional window name(s) before which previous-window file history is cleared.",
     )
     parser.add_argument(
+        "--post-rerank-feature-root",
+        type=str,
+        default="",
+        help=(
+            "Optional feature root containing <window>/file_view__file_node.tsv and "
+            "process_view__file_node.tsv for path-aware rerankers. Default: auto-infer from graph path."
+        ),
+    )
+    parser.add_argument(
         "--relation-group-scheme",
         type=str,
         default="coarse_v1",
@@ -151,6 +160,7 @@ def summarize_candidate_setting(
             method_name=args.post_rerank_method,
             candidate_rank_max=candidate_rank_max,
             previous_file_percentiles_by_uuid=previous_file_percentiles_by_uuid,
+            feature_root=args.post_rerank_feature_root or None,
         )
         metrics = evaluate_policy_on_window(reranked_rows, args)
         window_result = summarize_window(
@@ -202,6 +212,7 @@ def main() -> None:
         "base_post_rerank_method": summary.get("post_rerank_method"),
         "sweep_post_rerank_method": args.post_rerank_method,
         "history_reset_before_windows": list(args.history_reset_before_window),
+        "post_rerank_feature_root": args.post_rerank_feature_root,
         "policy_config": {
             "sparse_score_threshold": args.sparse_score_threshold,
             "sparse_max_count": args.sparse_max_count,

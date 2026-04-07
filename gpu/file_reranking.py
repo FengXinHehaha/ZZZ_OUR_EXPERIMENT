@@ -1,4 +1,6 @@
-from typing import Dict, List
+import csv
+from pathlib import Path
+from typing import Dict, List, Sequence
 
 from analyze_file_false_positives import compute_selected_node_stats
 
@@ -6,9 +8,19 @@ from analyze_file_false_positives import compute_selected_node_stats
 POST_RERANK_METHODS = (
     "none",
     "file_rerank_support",
+    "file_rerank_support_path",
     "file_rerank_support_write",
     "file_rerank_support_write_meta",
     "file_rerank_support_history",
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PATH_AWARE_RERANK_METHODS = {"file_rerank_support_path"}
+PATH_RISK_COLUMNS = (
+    "temp_path_count",
+    "hidden_path_count",
+    "script_path_count",
+    "system_bin_path_count",
 )
 
 
@@ -45,6 +57,128 @@ def candidate_file_rows(rows: List[Dict[str, object]], candidate_rank_max: int) 
         for row in rows
         if str(row["node_type"]) == "file" and int(row["rank"]) <= candidate_rank_max
     ]
+
+
+def dedup_paths(paths: Sequence[Path]) -> List[Path]:
+    ordered: List[Path] = []
+    seen = set()
+    for path in paths:
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(path)
+    return ordered
+
+
+def to_float(value: object) -> float:
+    if value in (None, ""):
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def resolve_post_rerank_feature_root(
+    graph_path: Path,
+    explicit_feature_root: Path | str | None = None,
+) -> Path | None:
+    graph_path = Path(graph_path).expanduser().resolve()
+    window_name = graph_path.parent.name
+    artifacts_dir = graph_path.parent.parent.parent
+    graph_root_name = graph_path.parent.parent.name
+
+    candidates: List[Path] = []
+    if explicit_feature_root:
+        candidates.append(Path(explicit_feature_root).expanduser().resolve())
+
+    if graph_root_name.startswith("graphs_"):
+        suffix = graph_root_name[len("graphs_") :]
+        candidates.extend(
+            [
+                artifacts_dir / f"features_model_ready_{suffix}",
+                artifacts_dir / f"features_cleaned_{suffix}",
+                artifacts_dir / f"features_{suffix}",
+            ]
+        )
+
+    candidates.extend(
+        [
+            artifacts_dir / "features_model_ready",
+            artifacts_dir / "features_cleaned",
+            artifacts_dir / "features",
+            REPO_ROOT / "artifacts" / "features_model_ready_hybrid_file_v2",
+            REPO_ROOT / "artifacts" / "features_model_ready",
+        ]
+    )
+
+    for candidate_root in dedup_paths(candidates):
+        file_view_path = candidate_root / window_name / "file_view__file_node.tsv"
+        process_view_path = candidate_root / window_name / "process_view__file_node.tsv"
+        if file_view_path.exists() and process_view_path.exists():
+            return candidate_root
+    return None
+
+
+def load_feature_rows_by_uuid(
+    tsv_path: Path,
+    keep_uuids: set[str],
+) -> Dict[str, Dict[str, str]]:
+    rows_by_uuid: Dict[str, Dict[str, str]] = {}
+    with tsv_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        for row in reader:
+            uuid = str(row.get("node_uuid", ""))
+            if uuid in keep_uuids:
+                rows_by_uuid[uuid] = row
+    return rows_by_uuid
+
+
+def build_candidate_path_feature_tables(
+    rows: List[Dict[str, object]],
+    graph_path: Path,
+    feature_root: Path | str | None = None,
+) -> Dict[str, Dict[str, float]]:
+    candidate_uuids = {str(row["node_uuid"]) for row in rows}
+    if not candidate_uuids:
+        return {
+            "known_path_count_pct": {},
+            "risky_path_count_pct": {},
+        }
+
+    resolved_feature_root = resolve_post_rerank_feature_root(graph_path, feature_root)
+    if resolved_feature_root is None:
+        return {
+            "known_path_count_pct": {},
+            "risky_path_count_pct": {},
+        }
+
+    window_dir = resolved_feature_root / graph_path.parent.name
+    file_view_rows = load_feature_rows_by_uuid(window_dir / "file_view__file_node.tsv", candidate_uuids)
+    process_view_rows = load_feature_rows_by_uuid(window_dir / "process_view__file_node.tsv", candidate_uuids)
+
+    known_path_counts: Dict[str, float] = {}
+    risky_path_counts: Dict[str, float] = {}
+    for uuid in candidate_uuids:
+        file_row = file_view_rows.get(uuid, {})
+        process_row = process_view_rows.get(uuid, {})
+        known_path_counts[uuid] = max(
+            to_float(file_row.get("unique_known_path_count")),
+            to_float(process_row.get("unique_known_path_count")),
+        )
+        risky_path_counts[uuid] = sum(
+            max(
+                to_float(file_row.get(column)),
+                to_float(process_row.get(column)),
+            )
+            for column in PATH_RISK_COLUMNS
+        )
+
+    return {
+        "known_path_count_pct": compute_percentile_lookup(known_path_counts),
+        "risky_path_count_pct": compute_percentile_lookup(risky_path_counts),
+    }
 
 
 def build_candidate_feature_tables(
@@ -89,6 +223,28 @@ def score_support_bundle(
     proc_pct = feature_tables["unique_process_neighbors_pct"].get(uuid, 0.0)
     read_pct = feature_tables["file_read_edges_pct"].get(uuid, 0.0)
     boost = 1.0 + 0.25 * degree_pct + 0.45 * proc_pct + 0.15 * read_pct
+    return base_score * boost
+
+
+def score_support_path_bundle(
+    base_score: float,
+    uuid: str,
+    feature_tables: Dict[str, Dict[str, float]],
+    path_feature_tables: Dict[str, Dict[str, float]],
+) -> float:
+    degree_pct = feature_tables["total_degree_pct"].get(uuid, 0.0)
+    proc_pct = feature_tables["unique_process_neighbors_pct"].get(uuid, 0.0)
+    read_pct = feature_tables["file_read_edges_pct"].get(uuid, 0.0)
+    known_path_pct = path_feature_tables["known_path_count_pct"].get(uuid, 0.0)
+    risky_path_pct = path_feature_tables["risky_path_count_pct"].get(uuid, 0.0)
+    boost = (
+        1.0
+        + 0.25 * degree_pct
+        + 0.45 * proc_pct
+        + 0.15 * read_pct
+        + 0.05 * known_path_pct
+        + 0.08 * risky_path_pct
+    )
     return base_score * boost
 
 
@@ -146,6 +302,7 @@ def rerank_scored_rows(
     method_name: str,
     candidate_rank_max: int,
     previous_file_percentiles_by_uuid: Dict[str, float] | None = None,
+    path_feature_tables: Dict[str, Dict[str, float]] | None = None,
 ) -> List[Dict[str, object]]:
     if method_name in {"none", "base_score"}:
         return clone_rows(rows)
@@ -155,6 +312,10 @@ def rerank_scored_rows(
     row_by_uuid = {str(row["node_uuid"]): row for row in reranked}
     feature_tables = build_candidate_feature_tables(candidates, node_stats)
     previous_lookup = previous_file_percentiles_by_uuid or {}
+    resolved_path_feature_tables = path_feature_tables or {
+        "known_path_count_pct": {},
+        "risky_path_count_pct": {},
+    }
 
     for row in candidates:
         uuid = str(row["node_uuid"])
@@ -162,6 +323,13 @@ def rerank_scored_rows(
         target_row = row_by_uuid[uuid]
         if method_name == "file_rerank_support":
             new_score = score_support_bundle(base_score, uuid, feature_tables)
+        elif method_name == "file_rerank_support_path":
+            new_score = score_support_path_bundle(
+                base_score,
+                uuid,
+                feature_tables,
+                resolved_path_feature_tables,
+            )
         elif method_name == "file_rerank_support_write":
             new_score = score_support_write_bundle(base_score, uuid, feature_tables)
         elif method_name == "file_rerank_support_write_meta":
@@ -190,6 +358,7 @@ def rerank_scored_rows_for_graph(
     method_name: str,
     candidate_rank_max: int,
     previous_file_percentiles_by_uuid: Dict[str, float] | None = None,
+    feature_root: Path | str | None = None,
 ) -> List[Dict[str, object]]:
     candidates = candidate_file_rows(rows, candidate_rank_max)
     selected_node_ids = [int(row["node_id"]) for row in candidates]
@@ -198,10 +367,18 @@ def rerank_scored_rows_for_graph(
         selected_node_ids=selected_node_ids,
         relation_group_scheme=relation_group_scheme,
     )
+    path_feature_tables = None
+    if method_name in PATH_AWARE_RERANK_METHODS:
+        path_feature_tables = build_candidate_path_feature_tables(
+            rows=candidates,
+            graph_path=Path(graph_path).expanduser().resolve(),
+            feature_root=feature_root,
+        )
     return rerank_scored_rows(
         rows=rows,
         node_stats=node_stats,
         method_name=method_name,
         candidate_rank_max=candidate_rank_max,
         previous_file_percentiles_by_uuid=previous_file_percentiles_by_uuid,
+        path_feature_tables=path_feature_tables,
     )

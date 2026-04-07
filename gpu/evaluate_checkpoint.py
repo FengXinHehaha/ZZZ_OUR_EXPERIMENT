@@ -91,6 +91,15 @@ def parse_args() -> argparse.Namespace:
         help="Only rerank file nodes whose current rank is at most this cutoff. Default: 10000.",
     )
     parser.add_argument(
+        "--post-rerank-feature-root",
+        type=str,
+        default="",
+        help=(
+            "Optional feature root containing <window>/file_view__file_node.tsv and "
+            "process_view__file_node.tsv for path-aware rerankers. Default: auto-infer from graph path."
+        ),
+    )
+    parser.add_argument(
         "--topk",
         type=int,
         action="append",
@@ -176,6 +185,7 @@ def evaluate_single_graph(
     relation_group_scheme: str,
     previous_history_percentiles_by_uuid: Dict[str, float] | None,
     previous_post_rerank_file_percentiles_by_uuid: Dict[str, float] | None,
+    post_rerank_feature_root: str,
 ) -> tuple[Dict[str, object], Dict[str, float], Dict[str, float]]:
     payload = prepare_graph_payload(
         graph_path,
@@ -266,6 +276,7 @@ def evaluate_single_graph(
             method_name=post_rerank_method,
             candidate_rank_max=post_rerank_candidate_rank_max,
             previous_file_percentiles_by_uuid=previous_post_rerank_file_percentiles_by_uuid,
+            feature_root=post_rerank_feature_root or None,
         )
 
     reranked_scores = torch.zeros(payload["num_nodes"], dtype=torch.float32)
@@ -305,6 +316,7 @@ def evaluate_single_graph(
         "score_calibration": score_calibration,
         "post_rerank_method": post_rerank_method,
         "post_rerank_candidate_rank_max": post_rerank_candidate_rank_max,
+        "post_rerank_feature_root": post_rerank_feature_root or "",
         "topk": topk_summary,
         "node_scores_file": str(node_scores_path),
     }
@@ -368,6 +380,7 @@ def main() -> None:
         "score_calibration": args.score_calibration,
         "post_rerank_method": args.post_rerank_method,
         "post_rerank_candidate_rank_max": args.post_rerank_candidate_rank_max,
+        "post_rerank_feature_root": args.post_rerank_feature_root,
         "history_source_method": HISTORY_SOURCE_METHOD,
         "history_reset_before_windows": list(args.history_reset_before_window),
         "graphs": [],
@@ -398,6 +411,7 @@ def main() -> None:
             relation_group_scheme=relation_group_scheme,
             previous_history_percentiles_by_uuid=previous_history_percentiles_by_uuid,
             previous_post_rerank_file_percentiles_by_uuid=previous_post_rerank_file_percentiles_by_uuid,
+            post_rerank_feature_root=args.post_rerank_feature_root,
         )
         aggregate["graphs"].append(summary)
         print(

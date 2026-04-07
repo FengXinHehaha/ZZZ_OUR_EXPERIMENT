@@ -72,6 +72,15 @@ def parse_args() -> argparse.Namespace:
         help="Relation grouping used when deriving file-node graph stats. Default: coarse_v1",
     )
     parser.add_argument(
+        "--post-rerank-feature-root",
+        type=str,
+        default="",
+        help=(
+            "Optional feature root containing <window>/file_view__file_node.tsv and "
+            "process_view__file_node.tsv for path-aware rerankers. Default: auto-infer from graph path."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=str,
         default=str(REPO_ROOT / "artifacts" / "evaluations"),
@@ -315,6 +324,7 @@ def main() -> None:
         "candidate_rank_max": args.candidate_rank_max,
         "history_reset_before_windows": list(args.history_reset_before_window),
         "relation_group_scheme": args.relation_group_scheme,
+        "post_rerank_feature_root": args.post_rerank_feature_root,
         "methods": methods,
         "topk": topk,
         "graphs": [],
@@ -351,6 +361,7 @@ def main() -> None:
                 method_name=method_name,
                 candidate_rank_max=args.candidate_rank_max,
                 previous_file_percentiles_by_uuid=previous_file_percentiles_by_uuid,
+                feature_root=args.post_rerank_feature_root or None,
             )
             node_scores_path = window_output_dir / method_name / "node_scores.tsv"
             ensure_dir(node_scores_path.parent)
