@@ -238,6 +238,7 @@ def main() -> None:
         )
         summary_row.update(
             {
+                "name": graph_summary["name"],
                 "path": graph_summary["path"],
                 "edge_loss": graph_summary.get("edge_loss"),
                 "score_method": graph_summary.get("score_method", summary.get("score_method")),
