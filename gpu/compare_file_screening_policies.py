@@ -9,6 +9,11 @@ from typing import Dict, Iterable, List, Tuple
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EVAL_DIR = REPO_ROOT / "artifacts" / "evaluations" / "rel_grouped_dot_30ep_history_file_only_eval"
 DEFAULT_FEATURE_ROOT = REPO_ROOT / "artifacts" / "features"
+DEFAULT_FALLBACK_FEATURE_ROOTS = (
+    REPO_ROOT / "artifacts" / "features",
+    REPO_ROOT / "artifacts" / "features_cleaned",
+    REPO_ROOT / "artifacts" / "features_model_ready",
+)
 DEFAULT_HISTORY_RESET_BEFORE_WINDOWS = ("test_2018-04-12",)
 DEFAULT_TOPK = (300, 1000, 5000, 10000)
 PATH_RISK_COLUMNS = (
@@ -171,15 +176,32 @@ def load_scored_rows(eval_dir: Path, window_name: str) -> List[Dict[str, object]
 def load_window_file_features(
     feature_root: Path,
     window_name: str,
-) -> Tuple[Dict[str, Dict[str, str]], Dict[str, Dict[str, str]]]:
-    window_dir = feature_root / window_name
-    file_view_path = window_dir / "file_view__file_node.tsv"
-    process_view_path = window_dir / "process_view__file_node.tsv"
-    if not file_view_path.exists():
-        raise FileNotFoundError(f"Missing file-view feature table: {file_view_path}")
-    if not process_view_path.exists():
-        raise FileNotFoundError(f"Missing process-view feature table: {process_view_path}")
-    return read_tsv_rows_by_uuid(file_view_path), read_tsv_rows_by_uuid(process_view_path)
+    fallback_feature_roots: Tuple[Path, ...] = DEFAULT_FALLBACK_FEATURE_ROOTS,
+) -> Tuple[Dict[str, Dict[str, str]], Dict[str, Dict[str, str]], Path]:
+    candidate_roots: List[Path] = []
+    seen: set[Path] = set()
+    for root in (feature_root, *fallback_feature_roots):
+        resolved = Path(root).expanduser().resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            candidate_roots.append(resolved)
+
+    for root in candidate_roots:
+        window_dir = root / window_name
+        file_view_path = window_dir / "file_view__file_node.tsv"
+        process_view_path = window_dir / "process_view__file_node.tsv"
+        if file_view_path.exists() and process_view_path.exists():
+            return (
+                read_tsv_rows_by_uuid(file_view_path),
+                read_tsv_rows_by_uuid(process_view_path),
+                root,
+            )
+
+    searched = [str(root / window_name) for root in candidate_roots]
+    raise FileNotFoundError(
+        "Missing file/process feature tables for window "
+        f"{window_name}. Searched: {searched}"
+    )
 
 
 def active_path_columns(file_view_rows: Dict[str, Dict[str, str]]) -> List[str]:
@@ -440,6 +462,7 @@ def main() -> None:
     results = {
         "eval_dir": str(eval_dir),
         "feature_root": str(feature_root),
+        "fallback_feature_roots": [str(Path(root).expanduser().resolve()) for root in DEFAULT_FALLBACK_FEATURE_ROOTS],
         "checkpoint": summary["checkpoint"],
         "checkpoint_epoch": summary["checkpoint_epoch"],
         "score_method": summary.get("score_method"),
@@ -474,12 +497,13 @@ def main() -> None:
             previous_window_name = None
 
         rows = load_scored_rows(eval_dir, window_name)
-        file_view_rows, process_view_rows = load_window_file_features(feature_root, window_name)
+        file_view_rows, process_view_rows, resolved_feature_root = load_window_file_features(feature_root, window_name)
         available_path_columns = active_path_columns(file_view_rows)
 
         print(
             f"[compare-file-screen] window={window_name} "
             f"file_rows={sum(1 for row in rows if str(row['node_type']) == 'file')} "
+            f"resolved_feature_root={resolved_feature_root} "
             f"path_rule_columns={available_path_columns}",
             flush=True,
         )
@@ -497,6 +521,7 @@ def main() -> None:
                 topk_values=topk_values,
             )
             window_summary["name"] = window_name
+            window_summary["resolved_feature_root"] = str(resolved_feature_root)
             per_policy_windows[policy_name].append(window_summary)
             print(f"[compare-file-screen] policy={policy_name}", flush=True)
             print_window_summary(window_name, window_summary)
