@@ -69,12 +69,60 @@ def overlay_group_files(base_manifest: Dict[str, object], v2_root: Path, output_
             shutil.copy2(source_path, target_path)
 
 
+def index_windows(manifest: Dict[str, object]) -> Dict[str, Dict[str, object]]:
+    return {window["window_name"]: window for window in manifest["windows"]}
+
+
+def replace_window_group_entries(base_manifest: Dict[str, object], v2_manifest: Dict[str, object]) -> Dict[str, object]:
+    merged = dict(base_manifest)
+    merged_windows = []
+    v2_windows = index_windows(v2_manifest)
+    for window in base_manifest["windows"]:
+        merged_window = dict(window)
+        merged_groups = dict(window.get("groups", {}))
+        v2_window = v2_windows.get(window["window_name"], {})
+        for group_name in FILE_GROUPS:
+            if group_name in v2_window.get("groups", {}):
+                merged_groups[group_name] = v2_window["groups"][group_name]
+        if merged_groups:
+            merged_window["groups"] = merged_groups
+        merged_windows.append(merged_window)
+    merged["windows"] = merged_windows
+    return merged
+
+
+def rewrite_window_metadata(output_root: Path, v2_root: Path) -> None:
+    for v2_window_dir in v2_root.iterdir():
+        if not v2_window_dir.is_dir():
+            continue
+        v2_metadata_path = v2_window_dir / "metadata.json"
+        out_metadata_path = output_root / v2_window_dir.name / "metadata.json"
+        if not v2_metadata_path.exists() or not out_metadata_path.exists():
+            continue
+        out_meta = load_json(out_metadata_path)
+        v2_meta = load_json(v2_metadata_path)
+        merged_groups = dict(out_meta.get("groups", {}))
+        for group_name in FILE_GROUPS:
+            if group_name in v2_meta.get("groups", {}):
+                merged_groups[group_name] = v2_meta["groups"][group_name]
+        if merged_groups:
+            out_meta["groups"] = merged_groups
+        for scalar_key in [
+            "file_view_rows",
+            "process_view__file_node_rows",
+            "file_node_count",
+        ]:
+            if scalar_key in v2_meta:
+                out_meta[scalar_key] = v2_meta[scalar_key]
+        write_json(out_metadata_path, out_meta)
+
+
 def merge_cleaned_manifest(
     base_manifest: Dict[str, object],
     v2_manifest: Dict[str, object],
     output_extracted_root: Path,
 ) -> Dict[str, object]:
-    merged = dict(base_manifest)
+    merged = replace_window_group_entries(base_manifest, v2_manifest)
     merged["group_specs"] = dict(base_manifest["group_specs"])
     for group_name in FILE_GROUPS:
         merged["group_specs"][group_name] = v2_manifest["group_specs"][group_name]
@@ -90,7 +138,7 @@ def merge_model_ready_manifest(
     v2_manifest: Dict[str, object],
     output_cleaned_root: Path,
 ) -> Dict[str, object]:
-    merged = dict(base_manifest)
+    merged = replace_window_group_entries(base_manifest, v2_manifest)
     merged["group_specs"] = dict(base_manifest["group_specs"])
     for group_name in FILE_GROUPS:
         merged["group_specs"][group_name] = v2_manifest["group_specs"][group_name]
@@ -135,6 +183,9 @@ def main() -> None:
     overlay_group_files(base_extracted_manifest, v2_extracted_root, output_extracted_root)
     overlay_group_files(base_extracted_manifest, v2_cleaned_root, output_cleaned_root)
     overlay_group_files(base_extracted_manifest, v2_model_ready_root, output_model_ready_root)
+    rewrite_window_metadata(output_extracted_root, v2_extracted_root)
+    rewrite_window_metadata(output_cleaned_root, v2_cleaned_root)
+    rewrite_window_metadata(output_model_ready_root, v2_model_ready_root)
 
     write_json(
         output_extracted_root / "feature_manifest.json",
