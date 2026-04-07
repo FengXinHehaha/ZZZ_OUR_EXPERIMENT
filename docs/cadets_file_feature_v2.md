@@ -53,6 +53,23 @@ export CADETS_PG_PASSWORD=1234
   --config /home/fxh/DeepSeek/ZZZ_OUR_EXPERIMENT/configs/cadets_event_ingest.json
 ```
 
+If the full seven-group export is slower than needed for file-focused iteration, use the faster
+file-only mode:
+
+```bash
+export CADETS_PG_PASSWORD=1234
+/home/fxh/anaconda3/envs/ZZZ_OUR_EXPERIMENT/bin/python \
+  /home/fxh/DeepSeek/ZZZ_OUR_EXPERIMENT/src/cadets_feature_v2_pipeline.py \
+  --config /home/fxh/DeepSeek/ZZZ_OUR_EXPERIMENT/configs/cadets_event_ingest.json \
+  --file-only
+```
+
+This writes to:
+
+- extracted: `artifacts/features_file_only_v2`
+- cleaned: `artifacts/features_cleaned_file_only_v2`
+- model-ready: `artifacts/features_model_ready_file_only_v2`
+
 The script will print the baseline-vs-v2 column diff for:
 
 - `file_view__file_node.tsv`

@@ -14,6 +14,9 @@ DEFAULT_EXTRACT_OUTPUT_DIR = REPO_ROOT / "artifacts" / "features_file_v2"
 DEFAULT_CLEAN_OUTPUT_DIR = REPO_ROOT / "artifacts" / "features_cleaned_file_v2"
 DEFAULT_ENCODE_OUTPUT_DIR = REPO_ROOT / "artifacts" / "features_model_ready_file_v2"
 DEFAULT_BASELINE_FEATURE_ROOT = REPO_ROOT / "artifacts" / "features"
+DEFAULT_FILE_ONLY_EXTRACT_OUTPUT_DIR = REPO_ROOT / "artifacts" / "features_file_only_v2"
+DEFAULT_FILE_ONLY_CLEAN_OUTPUT_DIR = REPO_ROOT / "artifacts" / "features_cleaned_file_only_v2"
+DEFAULT_FILE_ONLY_ENCODE_OUTPUT_DIR = REPO_ROOT / "artifacts" / "features_model_ready_file_only_v2"
 FILE_GROUP_FILES = [
     "file_view__file_node.tsv",
     "process_view__file_node.tsv",
@@ -68,6 +71,14 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=str(DEFAULT_BASELINE_FEATURE_ROOT),
         help=f"Directory of the current extracted baseline features for column diffing. Default: {DEFAULT_BASELINE_FEATURE_ROOT}",
+    )
+    parser.add_argument(
+        "--file-only",
+        action="store_true",
+        help=(
+            "Run the faster file-only v2 extractor/clean/encode chain. "
+            "This only materializes process_view__file_node and file_view__file_node."
+        ),
     )
     parser.add_argument(
         "--skip-extract",
@@ -148,11 +159,21 @@ def main() -> None:
     encode_output_dir = Path(args.encode_output_dir).expanduser().resolve()
     baseline_feature_root = Path(args.baseline_feature_root).expanduser().resolve()
 
+    extractor_script = REPO_ROOT / "src" / "cadets_feature_extract.py"
+    if args.file_only:
+        extractor_script = REPO_ROOT / "src" / "cadets_file_feature_extract_v2.py"
+        if str(args.extract_output_dir) == str(DEFAULT_EXTRACT_OUTPUT_DIR):
+            extract_output_dir = DEFAULT_FILE_ONLY_EXTRACT_OUTPUT_DIR.resolve()
+        if str(args.clean_output_dir) == str(DEFAULT_CLEAN_OUTPUT_DIR):
+            clean_output_dir = DEFAULT_FILE_ONLY_CLEAN_OUTPUT_DIR.resolve()
+        if str(args.encode_output_dir) == str(DEFAULT_ENCODE_OUTPUT_DIR):
+            encode_output_dir = DEFAULT_FILE_ONLY_ENCODE_OUTPUT_DIR.resolve()
+
     if not args.skip_extract:
         run_command(
             [
                 sys.executable,
-                str(REPO_ROOT / "src" / "cadets_feature_extract.py"),
+                str(extractor_script),
                 "--config",
                 str(config_path),
                 "--split-manifest",
